@@ -58,9 +58,12 @@ struct SpringConfig: Equatable {
         velocityEpsilon: 0.01
     )
 
+    // Hyprland's shipped "easy" window spring is underdamped (mass 1, stiffness 71.26,
+    // damping 15.83 -> ratio 0.9375). Same ratio here; stiffness raised so the settle
+    // tail stays short enough for per-frame AX writes.
     static let niriWindowMovement = SpringConfig(
-        dampingRatio: 1.0,
-        stiffness: 800.0,
+        dampingRatio: 0.9375,
+        stiffness: 300.0,
         epsilon: 0.0001,
         velocityEpsilon: 0.01
     )
@@ -72,10 +75,25 @@ struct SpringConfig: Equatable {
         velocityEpsilon: 0.01
     )
 
-    static let snappy = SpringConfig.niriHorizontalViewMovement
+    static let snappy = SpringConfig(
+        dampingRatio: 1.0,
+        stiffness: 1000.0,
+        epsilon: 0.0001,
+        velocityEpsilon: 0.01
+    )
     static let balanced = SpringConfig.niriWindowMovement
-    static let gentle = SpringConfig.niriWindowMovement
-    static let reducedMotion = SpringConfig.niriHorizontalViewMovement
+    static let gentle = SpringConfig(
+        dampingRatio: 0.85,
+        stiffness: 150.0,
+        epsilon: 0.0001,
+        velocityEpsilon: 0.01
+    )
+    static let reducedMotion = SpringConfig(
+        dampingRatio: 1.0,
+        stiffness: 1600.0,
+        epsilon: 0.0001,
+        velocityEpsilon: 0.01
+    )
     static let `default` = SpringConfig.snappy
 
     func resolvedForReduceMotion(_ reduceMotion: Bool) -> SpringConfig {

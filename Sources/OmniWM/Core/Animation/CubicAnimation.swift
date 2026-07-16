@@ -26,10 +26,12 @@ struct CubicConfig {
     }
 
     static let `default` = CubicConfig()
+    // Hyprland animates windows with its underdamped "easy" spring, not easeOutQuint
+    // (that curve drives borders there). y > 1 on cp1 encodes the spring's ~3% overshoot.
     static let hyprlandDwindle = CubicConfig(
-        duration: 0.2,
-        controlPoint1: CGPoint(x: 0.23, y: 1.0),
-        controlPoint2: CGPoint(x: 0.32, y: 1.0)
+        duration: 0.35,
+        controlPoint1: CGPoint(x: 0.34, y: 1.3),
+        controlPoint2: CGPoint(x: 0.64, y: 1.0)
     )
 
     func value(at progress: Double) -> Double {
