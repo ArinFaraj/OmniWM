@@ -1,9 +1,25 @@
-// swift-tools-version: 6.4
+// swift-tools-version: 6.3
 import Foundation
 import PackageDescription
 
 let packageDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent().path
 let ghosttyMacOSLibraryDirectory = "\(packageDirectory)/Frameworks/GhosttyKit.xcframework/macos-arm64"
+
+// ponytail: FoundationModelsIssueEngine.swift is gated behind #if compiler(>=6.4)
+// (its macro plugins don't load under the swiftly 6.3.3 toolchain). Match that
+// gate here so these flags, which only make sense when the file is compiled in,
+// don't break the link step on toolchains where the file is compiled out.
+#if compiler(>=6.4)
+let foundationModelsSwiftSettings: [SwiftSetting] = [
+    .unsafeFlags(["-Xfrontend", "-disable-autolink-framework", "-Xfrontend", "FoundationModels"])
+]
+let foundationModelsLinkerSettings: [LinkerSetting] = [
+    .unsafeFlags(["-weak_framework", "FoundationModels"])
+]
+#else
+let foundationModelsSwiftSettings: [SwiftSetting] = []
+let foundationModelsLinkerSettings: [LinkerSetting] = []
+#endif
 
 let package = Package(
     name: "OmniWM",
@@ -54,9 +70,8 @@ let package = Package(
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
-                .interoperabilityMode(.C),
-                .unsafeFlags(["-Xfrontend", "-disable-autolink-framework", "-Xfrontend", "FoundationModels"])
-            ],
+                .interoperabilityMode(.C)
+            ] + foundationModelsSwiftSettings,
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("ApplicationServices"),
@@ -67,9 +82,8 @@ let package = Package(
                 .linkedLibrary("z"),
                 .linkedLibrary("c++"),
                 .unsafeFlags(["-L\(ghosttyMacOSLibraryDirectory)"]),
-                .unsafeFlags(["-F/System/Library/PrivateFrameworks", "-framework", "SkyLight"]),
-                .unsafeFlags(["-weak_framework", "FoundationModels"])
-            ]
+                .unsafeFlags(["-F/System/Library/PrivateFrameworks", "-framework", "SkyLight"])
+            ] + foundationModelsLinkerSettings
         ),
         .executableTarget(
             name: "OmniWMApp",

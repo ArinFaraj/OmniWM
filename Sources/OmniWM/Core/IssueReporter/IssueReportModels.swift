@@ -54,9 +54,11 @@ protocol IssueRewriting {
 @MainActor
 enum IssueRewritingFactory {
     static func make() -> (any IssueRewriting)? {
+        #if compiler(>=6.4)
         if #available(macOS 27.0, *) {
             return FoundationModelsIssueEngine()
         }
+        #endif
         return nil
     }
 }

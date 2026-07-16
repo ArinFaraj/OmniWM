@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2026 BarutSRB — https://github.com/BarutSRB/OmniWM
 
+// ponytail: FoundationModels macro plugins (@Generable/@Guide) do not load under
+// the swiftly 6.3.3 toolchain, only under a 6.4 toolchain. This whole file is
+// already dead below macOS 27 at runtime (see IssueRewritingFactory), so gate
+// it out at compile time too until a 6.4 toolchain is available. Flip back on
+// by removing this #if once swift-tools-version 6.4 has a real toolchain.
+#if compiler(>=6.4)
+
 import Foundation
 import FoundationModels
 
@@ -82,3 +89,5 @@ private struct GeneratedIssue {
     @Guide(description: "Other context the user gave: layout, monitors, app/window, hotkey+command, or 'Not provided'")
     var additionalContext: String
 }
+
+#endif

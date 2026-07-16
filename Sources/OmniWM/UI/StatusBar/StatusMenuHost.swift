@@ -16,8 +16,15 @@ struct StatusMenuDismissAction: Sendable {
     }
 }
 
+private struct StatusMenuDismissKey: EnvironmentKey {
+    static let defaultValue = StatusMenuDismissAction(dismiss: {})
+}
+
 extension EnvironmentValues {
-    @Entry var statusMenuDismiss = StatusMenuDismissAction(dismiss: {})
+    var statusMenuDismiss: StatusMenuDismissAction {
+        get { self[StatusMenuDismissKey.self] }
+        set { self[StatusMenuDismissKey.self] = newValue }
+    }
 }
 
 let statusMenuWidth: CGFloat = 280
