@@ -2819,26 +2819,20 @@ import QuartzCore
             controller.axManager.cancelPendingFrameJobs(inactiveWindowJobs)
         }
 
+        // Outgoing windows use the standard instant park (1px off the right edge). The
+        // earlier custom animated slide-out drove them via SkyLight moves that silently
+        // miss on macOS 26.x, leaving a visible sliver - so the outgoing side is NOT
+        // animated. The incoming workspace still slides in (seeded frame animation), which
+        // reads as a Hyprland-style push without the sliver risk.
         let preferredSides = preferredHideSides(for: controller.workspaceManager.monitors)
-        var slidesByMonitor: [Monitor.ID: WorkspaceSlideContext] = [:]
         for snapshot in workspaceEntries where !activeWorkspaceIds.contains(snapshot.workspace.id) {
             guard let monitor = controller.workspaceManager.monitor(for: snapshot.workspace.id) else { continue }
-            var preferredSide = preferredSides[monitor.id] ?? .right
-            var animated = false
-            let slide = slidesByMonitor[monitor.id] ?? takeOutgoingSlide(for: monitor.id)
-            if let slide {
-                slidesByMonitor[monitor.id] = slide
-                // Outgoing windows exit opposite the edge the incoming ones enter from,
-                // so both workspaces travel in the same direction like Hyprland's slide.
-                preferredSide = slide.dx > 0 ? .left : .right
-                animated = true
-            }
+            let preferredSide = preferredSides[monitor.id] ?? .right
             hideWorkspace(
                 snapshot.entries,
                 monitor: monitor,
                 preferredSide: preferredSide,
-                hiddenPlacementMonitors: hiddenPlacementMonitors,
-                animated: animated
+                hiddenPlacementMonitors: hiddenPlacementMonitors
             )
         }
     }

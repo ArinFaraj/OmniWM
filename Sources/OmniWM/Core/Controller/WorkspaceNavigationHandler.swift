@@ -551,7 +551,10 @@ final class WorkspaceNavigationHandler {
     // short of their park and leave a visible sliver on inactive workspaces. Stock instant
     // switching parks correctly. Flip this to true to re-enable once slides drive purely
     // through AX writes (SkyLight-independent) end to end.
-    private static let workspaceSlideEnabled = false
+    // Incoming-slide only: the target workspace's windows slide in via the safe seeded
+    // frame animation (always land on their tiles). The outgoing workspace uses the
+    // standard instant park (the custom SkyLight slide-out that caused the sliver is gone).
+    private static let workspaceSlideEnabled = true
 
     private func beginWorkspaceSlideIfNeeded(
         from previousWorkspace: WorkspaceDescriptor?,

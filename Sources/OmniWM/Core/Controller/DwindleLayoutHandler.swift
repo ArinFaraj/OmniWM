@@ -1084,22 +1084,21 @@ import QuartzCore
             fullscreenScreen: snapshot.monitor.fullscreenLayoutFrame
         )
 
-        // Workspace slide: windows stay hidden while SkyLight moves carry them in from
-        // the travel edge; restores are gated until the slide completes, then the
-        // completion relayout performs the verified reveal on settled windows.
+        // Workspace slide (incoming): seed each window's animation to start one screen-width
+        // toward the travel edge, so the existing frame-animation carries the whole workspace
+        // in to its tiles. Safe by construction: the animation target is always the real
+        // tile, so a window either slides in or (if the animation is skipped) lands on its
+        // tile - it can never strand or leave a sliver. The outgoing workspace uses the
+        // standard instant park (no custom SkyLight move), which is what caused the earlier
+        // sliver, so it is deliberately not animated here.
         if snapshot.isActiveWorkspace,
            let slide = controller?.layoutRefreshController.takeIncomingSlide(for: snapshot.workspaceId)
         {
-            let slideEntries = snapshot.windows.compactMap { window -> (WindowToken, CGRect)? in
-                guard window.hiddenState != nil, let frame = newFrames[window.token] else { return nil }
-                return (window.token, frame)
+            for (token, frame) in newFrames {
+                let seeded = frame.offsetBy(dx: slide.dx, dy: 0)
+                oldFrames[token] = seeded
+                previousTargetFrames[token] = seeded
             }
-            controller?.layoutRefreshController.startSlideInAnimations(
-                entries: slideEntries,
-                workspaceId: snapshot.workspaceId,
-                displayId: snapshot.monitor.displayId,
-                dx: slide.dx
-            )
         }
 
         if !removedTokens.isEmpty {
