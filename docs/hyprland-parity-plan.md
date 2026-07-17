@@ -27,6 +27,17 @@ Dwindle mode (what the user runs) has NO open or close animation at all - only w
 3. **Overview polish** — already owns surfaces; if thumbnails go live, move CGContext -> CALayer.contents=IOSurface.
 4. **Workspace slide (1:1 gesture)** — marquee. Real windows stay parked at 1px (capturable) during the slide; proxies (snapshots) animate; reveal real at end. Cleanest no-SIP channel (no double-image). Rebuild `workspaceSwitch` gesture like `columnScroll` (1:1). Flip `workspaceSlideEnabled` only when incoming renders via proxies. Gated on the transform calibration harness.
 
+## Staged: open pop-in wiring (execute + VISUALLY VERIFY when screen is unlocked)
+Built + compiled: `WindowPopInAnimator` (Core/Animation/WindowPopInAnimator.swift) - owned NSPanel proxy, CoreAnimation scale 0.85->1.0 + fade over ~0.28s, easeOutQuint-ish curve, capture via SCScreenshotManager, onComplete GUARANTEED once (safety timeout). Wired to nothing yet.
+Wiring TODO (needs unlocked screen to verify):
+1. Add flag `proxyPopInEnabled` (default false). Gate all of this behind it.
+2. Hook: in the dwindle new-window path, when a token is brand-new AND its target tile T is known AND animations enabled AND flag on:
+   - playPopIn(windowId, topLeftFrame: T, onCaptured: { ok in if ok { park the real window hidden at 1px } }, onComplete: { reveal the real window at T }).
+   - Capture happens on the still-visible real window; then park; proxy grows at T; reveal at completion. Real window hidden only during the ~0.28s, and onComplete ALWAYS reveals (safety timeout) so it can never get stranded.
+3. Verify visually: enable flag, rebuild, open several new windows (Finder, terminal, browser), watch for: correct position (coordinate Y-flip via ScreenCoordinateSpace.toAppKit), no double-image, no flash-before-park, smooth 120fps, clean reveal with no snap. Tune duration/curve/start-scale to taste.
+4. KNOWN GOTCHAS from harness (SLS path; less relevant to the NSPanel CoreAnimation path but note): SLSSetWindowShape must precede drawing; content CGContext is Y-up while placement is Y-down; SkyLightWindowOrder.above==0 is actually kCGSOrderOut (LATENT BUG in SkyLight.swift:8 - should be 1; used by CommandPalette/WMController; fix WITH visual verification, not blind).
+5. Then pop-out (close) via a rolling last-snapshot, overview polish, workspace slide.
+
 ## Tier-1 non-backend wins (independent, ship anytime)
 - DONE: reduce-motion no-op fixed; SLSSetWindowTransform primitive added.
 - TODO: input taps to a dedicated CFRunLoop thread (freeze-class structural fix; MouseEventHandler.swift:213 / Hotkeys.swift:497; lock-guarded SwallowSnapshot). Medium risk; do on a turn where input can be exercised + `pkill -USR1` ready.
