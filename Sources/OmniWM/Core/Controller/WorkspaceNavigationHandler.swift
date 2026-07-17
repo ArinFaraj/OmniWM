@@ -474,17 +474,46 @@ final class WorkspaceNavigationHandler {
             for: rawWorkspaceID,
             createIfMissing: false
         ),
-            controller.workspaceManager.monitorForWorkspace(targetWorkspaceId) != nil
+            let targetMonitor = controller.workspaceManager.monitorForWorkspace(targetWorkspaceId)
         else {
             return
         }
 
+        // The workspace being deactivated is the one active on the target monitor,
+        // not necessarily the globally focused one; capture it before the flip.
+        let previousOnMonitor = controller.workspaceManager.activeWorkspaceOrFirst(on: targetMonitor.id)
+
         guard let result = controller.workspaceManager.focusWorkspace(named: rawWorkspaceID) else { return }
+
+        beginWorkspaceSlideIfNeeded(
+            from: previousOnMonitor,
+            to: result.workspace,
+            monitor: result.monitor
+        )
 
         commitWorkspaceTransitionFocusHandoff(
             targetWorkspaceId: result.workspace.id,
             monitor: result.monitor,
             startScrollAnimation: false
+        )
+    }
+
+    private func beginWorkspaceSlideIfNeeded(
+        from previousWorkspace: WorkspaceDescriptor?,
+        to targetWorkspace: WorkspaceDescriptor,
+        monitor: Monitor?
+    ) {
+        guard let controller, let monitor, let previousWorkspace,
+              previousWorkspace.id != targetWorkspace.id,
+              let previousNumber = Int(previousWorkspace.name),
+              let targetNumber = Int(targetWorkspace.name),
+              previousNumber != targetNumber
+        else { return }
+        let dx = (targetNumber > previousNumber ? 1.0 : -1.0) * monitor.frame.width
+        controller.layoutRefreshController.beginWorkspaceSlide(
+            targetWorkspaceId: targetWorkspace.id,
+            monitorId: monitor.id,
+            dx: dx
         )
     }
 
@@ -524,6 +553,11 @@ final class WorkspaceNavigationHandler {
 
         let monitor = controller.workspaceManager.monitor(for: targetWorkspace.id)
             ?? controller.workspaceManager.monitor(byId: currentMonitorId)
+        beginWorkspaceSlideIfNeeded(
+            from: currentWorkspace,
+            to: targetWorkspace,
+            monitor: monitor
+        )
         commitWorkspaceTransitionFocusHandoff(
             targetWorkspaceId: targetWorkspace.id,
             monitor: monitor,
@@ -603,6 +637,11 @@ final class WorkspaceNavigationHandler {
 
         let monitor = controller.workspaceManager.monitor(for: prevWorkspace.id)
             ?? controller.workspaceManager.monitor(byId: currentMonitorId)
+        beginWorkspaceSlideIfNeeded(
+            from: currentWorkspace,
+            to: prevWorkspace,
+            monitor: monitor
+        )
         commitWorkspaceTransitionFocusHandoff(
             targetWorkspaceId: prevWorkspace.id,
             monitor: monitor,

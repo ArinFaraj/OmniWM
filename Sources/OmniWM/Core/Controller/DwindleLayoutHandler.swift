@@ -1083,6 +1083,19 @@ import QuartzCore
             screen: snapshot.monitor.workingFrame,
             fullscreenScreen: snapshot.monitor.fullscreenLayoutFrame
         )
+
+        // Workspace slide: seed every incoming window one slide-width off its target so
+        // the normal move-animation pipeline carries the whole workspace in from that edge.
+        if snapshot.isActiveWorkspace,
+           let slide = controller?.layoutRefreshController.takeIncomingSlide(for: snapshot.workspaceId)
+        {
+            for (token, frame) in newFrames {
+                let seeded = frame.offsetBy(dx: slide.dx, dy: 0)
+                oldFrames[token] = seeded
+                previousTargetFrames[token] = seeded
+            }
+        }
+
         if !removedTokens.isEmpty {
             controller?.windowActionHandler.refreshOverviewProjection(
                 affectedWorkspaceIds: [snapshot.workspaceId],

@@ -163,6 +163,7 @@ import QuartzCore
         var trailingAuditTask: Task<Void, Never>?
         var refreshRateByDisplay: [CGDirectDisplayID: Double] = [:]
         var closingAnimationsByDisplay: [CGDirectDisplayID: [Int: ClosingAnimation]] = [:]
+        var slideAnimationsByDisplay: [CGDirectDisplayID: [Int: ClosingAnimation]] = [:]
         var screenChangeObserver: NSObjectProtocol?
         var hasCompletedInitialRefresh: Bool = false
         var didExecuteEffectPlan: Bool = false
@@ -238,6 +239,7 @@ import QuartzCore
         }
 
         layoutState.closingAnimationsByDisplay.removeValue(forKey: displayId)
+        layoutState.slideAnimationsByDisplay.removeValue(forKey: displayId)
 
         if migrateAnimations {
             if let wsId = niriHandler.scrollAnimationByDisplay.removeValue(forKey: displayId) {
@@ -273,6 +275,7 @@ import QuartzCore
             dwindleHandler.tickDwindleAnimation(targetTime: displayLink.targetTimestamp, displayId: displayId)
             t2 = traceActive ? CACurrentMediaTime() : 0
             tickClosingAnimations(targetTime: displayLink.targetTimestamp, displayId: displayId)
+            tickSlideAnimations(targetTime: displayLink.targetTimestamp, displayId: displayId)
             t3 = traceActive ? CACurrentMediaTime() : 0
             controller?.surfaceReconciler.reconcileAnimationTick()
         }
@@ -415,6 +418,66 @@ import QuartzCore
         }
     }
 
+    // Hyprland-style workspace slide: set once per switch, consumed by at most one
+    // incoming relayout (seeds dwindle move animations) and one outgoing hide pass
+    // (animates the park move). The deadline expires stale contexts so an aborted
+    // switch can never seed a later, unrelated relayout.
+    struct WorkspaceSlideContext {
+        let targetWorkspaceId: WorkspaceDescriptor.ID
+        let monitorId: Monitor.ID
+        let dx: CGFloat
+        let deadline: CFTimeInterval
+        var incomingConsumed = false
+        var outgoingConsumed = false
+    }
+
+    private var pendingWorkspaceSlide: WorkspaceSlideContext?
+
+    func beginWorkspaceSlide(
+        targetWorkspaceId: WorkspaceDescriptor.ID,
+        monitorId: Monitor.ID,
+        dx: CGFloat
+    ) {
+        guard controller?.motionPolicy.animationsEnabled != false else { return }
+        pendingWorkspaceSlide = WorkspaceSlideContext(
+            targetWorkspaceId: targetWorkspaceId,
+            monitorId: monitorId,
+            dx: dx,
+            deadline: CACurrentMediaTime() + 1.0
+        )
+    }
+
+    func takeIncomingSlide(for workspaceId: WorkspaceDescriptor.ID) -> WorkspaceSlideContext? {
+        guard var slide = validPendingSlide(), slide.targetWorkspaceId == workspaceId,
+              !slide.incomingConsumed
+        else {
+            return nil
+        }
+        slide.incomingConsumed = true
+        pendingWorkspaceSlide = slide.outgoingConsumed ? nil : slide
+        return slide
+    }
+
+    func takeOutgoingSlide(for monitorId: Monitor.ID) -> WorkspaceSlideContext? {
+        guard var slide = validPendingSlide(), slide.monitorId == monitorId,
+              !slide.outgoingConsumed
+        else {
+            return nil
+        }
+        slide.outgoingConsumed = true
+        pendingWorkspaceSlide = slide.incomingConsumed ? nil : slide
+        return slide
+    }
+
+    private func validPendingSlide() -> WorkspaceSlideContext? {
+        guard let slide = pendingWorkspaceSlide else { return nil }
+        guard CACurrentMediaTime() < slide.deadline else {
+            pendingWorkspaceSlide = nil
+            return nil
+        }
+        return slide
+    }
+
     func startWindowCloseAnimation(entry: WindowState, monitor: Monitor) {
         guard controller?.motionPolicy.animationsEnabled != false else { return }
         guard controller != nil else { return }
@@ -470,7 +533,8 @@ import QuartzCore
     private func stopDisplayLinkIfIdle(for displayId: CGDirectDisplayID) {
         if niriHandler.scrollAnimationByDisplay[displayId] == nil,
            dwindleHandler.dwindleAnimationByDisplay[displayId] == nil,
-           layoutState.closingAnimationsByDisplay[displayId].map({ $0.isEmpty }) ?? true
+           layoutState.closingAnimationsByDisplay[displayId].map({ $0.isEmpty }) ?? true,
+           layoutState.slideAnimationsByDisplay[displayId].map({ $0.isEmpty }) ?? true
         {
             // Idle display links must not remain cached after teardown.
             if let link = layoutState.displayLinksByDisplay.removeValue(forKey: displayId) {
@@ -522,6 +586,77 @@ import QuartzCore
         } else {
             layoutState.closingAnimationsByDisplay[displayId] = remaining
         }
+    }
+
+    // Workspace-slide park moves are pure translations, so they ride the same
+    // SkyLight move path the instant park uses; the app never sees per-frame AX writes.
+    private func tickSlideAnimations(targetTime: CFTimeInterval, displayId: CGDirectDisplayID) {
+        guard let animations = layoutState.slideAnimationsByDisplay[displayId], !animations.isEmpty else {
+            return
+        }
+
+        var remaining: [Int: LayoutState.ClosingAnimation] = [:]
+        var moves: [(windowId: Int, origin: CGPoint)] = []
+        moves.reserveCapacity(animations.count)
+
+        for (windowId, animation) in animations {
+            moves.append((windowId, animation.currentFrame(at: targetTime).origin))
+            if !animation.isComplete(at: targetTime) {
+                remaining[windowId] = animation
+            }
+        }
+
+        controller?.axManager.applyPositionsViaSkyLight(moves, allowInactive: true)
+
+        if remaining.isEmpty {
+            layoutState.slideAnimationsByDisplay.removeValue(forKey: displayId)
+            stopDisplayLinkIfIdle(for: displayId)
+        } else {
+            layoutState.slideAnimationsByDisplay[displayId] = remaining
+        }
+    }
+
+    private func startSlideOutAnimation(
+        entry: WindowState,
+        plan: WindowPositionPlan,
+        monitor: Monitor
+    ) -> Bool {
+        guard controller?.motionPolicy.animationsEnabled != false else { return false }
+        guard let fromFrame = fastFrame(for: entry.token, axRef: entry.axRef) else { return false }
+        let displacement = CGPoint(
+            x: plan.origin.x - fromFrame.origin.x,
+            y: plan.origin.y - fromFrame.origin.y
+        )
+        guard abs(displacement.x) > 1 || abs(displacement.y) > 1 else { return false }
+
+        var animations = layoutState.slideAnimationsByDisplay[monitor.displayId] ?? [:]
+        guard animations[entry.windowId] == nil else { return true }
+
+        let now = CACurrentMediaTime()
+        let refreshRate = layoutState.refreshRateByDisplay[monitor.displayId] ?? 60.0
+        animations[entry.windowId] = LayoutState.ClosingAnimation(
+            windowId: entry.windowId,
+            axRef: entry.axRef,
+            fromFrame: fromFrame,
+            displacement: displacement,
+            animation: SpringAnimation(
+                from: 0,
+                to: 1,
+                startTime: now,
+                config: .balanced.with(epsilon: 0.01, velocityEpsilon: 0.1),
+                displayRefreshRate: refreshRate
+            )
+        )
+        layoutState.slideAnimationsByDisplay[monitor.displayId] = animations
+
+        if let displayLink = getOrCreateDisplayLink(for: monitor.displayId) {
+            displayLink.add(to: .main, forMode: .common)
+        }
+        return true
+    }
+
+    private func hasSlideAnimation(windowId: Int, displayId: CGDirectDisplayID) -> Bool {
+        layoutState.slideAnimationsByDisplay[displayId]?[windowId] != nil
     }
 
     func applyLayoutForWorkspaces(_ workspaceIds: Set<WorkspaceDescriptor.ID>) {
@@ -1212,6 +1347,7 @@ import QuartzCore
         niriHandler.scrollAnimationByDisplay.removeAll()
         dwindleHandler.dwindleAnimationByDisplay.removeAll()
         layoutState.closingAnimationsByDisplay.removeAll()
+        layoutState.slideAnimationsByDisplay.removeAll()
 
         controller?.axManager.clearInactiveWorkspaceWindows()
 
@@ -2445,14 +2581,25 @@ import QuartzCore
         }
 
         let preferredSides = preferredHideSides(for: controller.workspaceManager.monitors)
+        var slidesByMonitor: [Monitor.ID: WorkspaceSlideContext] = [:]
         for snapshot in workspaceEntries where !activeWorkspaceIds.contains(snapshot.workspace.id) {
             guard let monitor = controller.workspaceManager.monitor(for: snapshot.workspace.id) else { continue }
-            let preferredSide = preferredSides[monitor.id] ?? .right
+            var preferredSide = preferredSides[monitor.id] ?? .right
+            var animated = false
+            let slide = slidesByMonitor[monitor.id] ?? takeOutgoingSlide(for: monitor.id)
+            if let slide {
+                slidesByMonitor[monitor.id] = slide
+                // Outgoing windows exit opposite the edge the incoming ones enter from,
+                // so both workspaces travel in the same direction like Hyprland's slide.
+                preferredSide = slide.dx > 0 ? .left : .right
+                animated = true
+            }
             hideWorkspace(
                 snapshot.entries,
                 monitor: monitor,
                 preferredSide: preferredSide,
-                hiddenPlacementMonitors: hiddenPlacementMonitors
+                hiddenPlacementMonitors: hiddenPlacementMonitors,
+                animated: animated
             )
         }
     }
@@ -2473,7 +2620,8 @@ import QuartzCore
         _ entries: [WindowState],
         monitor: Monitor,
         preferredSide: HideSide,
-        hiddenPlacementMonitors: [HiddenPlacementMonitorContext]? = nil
+        hiddenPlacementMonitors: [HiddenPlacementMonitorContext]? = nil,
+        animated: Bool = false
     ) {
         guard let controller else { return }
         for entry in entries {
@@ -2489,7 +2637,8 @@ import QuartzCore
                 monitor: monitor,
                 side: preferredSide,
                 reason: .workspaceInactive,
-                hiddenPlacementMonitors: hiddenPlacementMonitors
+                hiddenPlacementMonitors: hiddenPlacementMonitors,
+                animated: animated
             )
         }
     }
@@ -2708,7 +2857,8 @@ import QuartzCore
         monitor: Monitor,
         side: HideSide,
         reason: HideReason,
-        hiddenPlacementMonitors: [HiddenPlacementMonitorContext]? = nil
+        hiddenPlacementMonitors: [HiddenPlacementMonitorContext]? = nil,
+        animated: Bool = false
     ) {
         guard let controller else { return }
         let frameEntry = (pid: entry.pid, windowId: entry.windowId)
@@ -2723,7 +2873,13 @@ import QuartzCore
             controller.workspaceManager.setHiddenState(hiddenState, for: entry.token)
             controller.axManager.cancelPendingFrameJobs([frameEntry])
             controller.axManager.suppressFrameWrites([frameEntry])
-            applyPositionPlans([plan])
+            if animated, startSlideOutAnimation(entry: entry, plan: plan, monitor: monitor) {
+                // slide animation parks the window over the next few frames
+            } else if hasSlideAnimation(windowId: entry.windowId, displayId: monitor.displayId) {
+                // an in-flight slide already owns this window's frame; don't snap it
+            } else {
+                applyPositionPlans([plan])
+            }
         case let .alreadyHidden(hiddenState):
             controller.workspaceManager.setHiddenState(hiddenState, for: entry.token)
             controller.axManager.cancelPendingFrameJobs([frameEntry])
