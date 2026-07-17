@@ -162,8 +162,35 @@ import QuartzCore
         var lastParkAuditTime: CFTimeInterval = 0
         var trailingAuditTask: Task<Void, Never>?
         var refreshRateByDisplay: [CGDirectDisplayID: Double] = [:]
+        // Workspace-slide entries. The window stays officially hidden (HiddenState set,
+        // frame writes suppressed) for the whole slide; only its compositor position is
+        // driven, via SkyLight moves. The verified reveal/park happens once, at
+        // completion, when nothing is moving - so it can never race the animation.
+        fileprivate struct SlideAnimation {
+            let windowId: Int
+            let token: WindowToken
+            let workspaceId: WorkspaceDescriptor.ID
+            let fromFrame: CGRect
+            let displacement: CGPoint
+            let animation: SpringAnimation
+            let completionPlan: WindowPositionPlan?
+            let isIncoming: Bool
+
+            func isComplete(at time: TimeInterval) -> Bool {
+                animation.isComplete(at: time)
+            }
+
+            func currentOrigin(at time: TimeInterval) -> CGPoint {
+                let clamped = min(max(animation.value(at: time), 0), 1)
+                return CGPoint(
+                    x: fromFrame.origin.x + displacement.x * CGFloat(clamped),
+                    y: fromFrame.origin.y + displacement.y * CGFloat(clamped)
+                )
+            }
+        }
+
         var closingAnimationsByDisplay: [CGDirectDisplayID: [Int: ClosingAnimation]] = [:]
-        var slideAnimationsByDisplay: [CGDirectDisplayID: [Int: ClosingAnimation]] = [:]
+        fileprivate var slideAnimationsByDisplay: [CGDirectDisplayID: [Int: SlideAnimation]] = [:]
         var screenChangeObserver: NSObjectProtocol?
         var hasCompletedInitialRefresh: Bool = false
         var didExecuteEffectPlan: Bool = false
@@ -588,31 +615,70 @@ import QuartzCore
         }
     }
 
-    // Workspace-slide park moves are pure translations, so they ride the same
-    // SkyLight move path the instant park uses; the app never sees per-frame AX writes.
+    // Slides drive only the compositor position (SkyLight moves) while the window
+    // stays officially hidden. The verified reveal (incoming) or park (outgoing)
+    // runs once at completion, on a settled window, so it can never fight the
+    // animation the way per-tick AX writes fought the reveal transactions.
     private func tickSlideAnimations(targetTime: CFTimeInterval, displayId: CGDirectDisplayID) {
-        guard let animations = layoutState.slideAnimationsByDisplay[displayId], !animations.isEmpty else {
+        guard let controller,
+              let animations = layoutState.slideAnimationsByDisplay[displayId], !animations.isEmpty
+        else {
             return
         }
 
-        var remaining: [Int: LayoutState.ClosingAnimation] = [:]
+        var remaining: [Int: LayoutState.SlideAnimation] = [:]
         var moves: [(windowId: Int, origin: CGPoint)] = []
+        var completedParkPlans: [WindowPositionPlan] = []
+        var completedIncomingWorkspaces: Set<WorkspaceDescriptor.ID> = []
         moves.reserveCapacity(animations.count)
 
-        for (windowId, animation) in animations {
-            moves.append((windowId, animation.currentFrame(at: targetTime).origin))
-            if !animation.isComplete(at: targetTime) {
-                remaining[windowId] = animation
+        for (windowId, slide) in animations {
+            guard controller.workspaceManager.hiddenState(for: slide.token) != nil else {
+                // Something else already revealed this window (moved back, focus raise);
+                // it owns the frame now, stop driving.
+                Log.layout.info("slide cancelled, window revealed elsewhere windowId=\(windowId) incoming=\(slide.isIncoming)")
+                continue
             }
+            if slide.isComplete(at: targetTime) {
+                moves.append((windowId, slide.currentOrigin(at: targetTime)))
+                if slide.isIncoming {
+                    completedIncomingWorkspaces.insert(slide.workspaceId)
+                } else if let plan = slide.completionPlan {
+                    completedParkPlans.append(plan)
+                }
+                continue
+            }
+            moves.append((windowId, slide.currentOrigin(at: targetTime)))
+            remaining[windowId] = slide
         }
 
-        controller?.axManager.applyPositionsViaSkyLight(moves, allowInactive: true)
+        if !moves.isEmpty {
+            controller.axManager.applyPositionsViaSkyLight(moves, allowInactive: true)
+        }
 
         if remaining.isEmpty {
             layoutState.slideAnimationsByDisplay.removeValue(forKey: displayId)
             stopDisplayLinkIfIdle(for: displayId)
         } else {
             layoutState.slideAnimationsByDisplay[displayId] = remaining
+        }
+
+        // Verified park (with AX fallback) after the dict update, so the slide guard
+        // in applyPositionPlans no longer filters these windows.
+        if !completedParkPlans.isEmpty {
+            applyPositionPlans(completedParkPlans)
+            for plan in completedParkPlans {
+                Log.layout.info("slide-out parked windowId=\(plan.entry.windowId)")
+            }
+        }
+
+        // Incoming windows are visually at their targets; run the real reveal now.
+        if !completedIncomingWorkspaces.isEmpty {
+            Log.layout.info("slide-in complete, revealing workspaces=\(completedIncomingWorkspaces.count)")
+            commitWorkspaceTransition(
+                affectedWorkspaces: completedIncomingWorkspaces,
+                reason: .workspaceTransition
+            )
         }
     }
 
@@ -634,9 +700,10 @@ import QuartzCore
 
         let now = CACurrentMediaTime()
         let refreshRate = layoutState.refreshRateByDisplay[monitor.displayId] ?? 60.0
-        animations[entry.windowId] = LayoutState.ClosingAnimation(
+        animations[entry.windowId] = LayoutState.SlideAnimation(
             windowId: entry.windowId,
-            axRef: entry.axRef,
+            token: entry.token,
+            workspaceId: entry.workspaceId,
             fromFrame: fromFrame,
             displacement: displacement,
             animation: SpringAnimation(
@@ -645,7 +712,9 @@ import QuartzCore
                 startTime: now,
                 config: .balanced.with(epsilon: 0.01, velocityEpsilon: 0.1),
                 displayRefreshRate: refreshRate
-            )
+            ),
+            completionPlan: plan,
+            isIncoming: false
         )
         layoutState.slideAnimationsByDisplay[monitor.displayId] = animations
 
@@ -655,8 +724,65 @@ import QuartzCore
         return true
     }
 
-    private func hasSlideAnimation(windowId: Int, displayId: CGDirectDisplayID) -> Bool {
-        layoutState.slideAnimationsByDisplay[displayId]?[windowId] != nil
+    func startSlideInAnimations(
+        entries: [(WindowToken, CGRect)],
+        workspaceId: WorkspaceDescriptor.ID,
+        displayId: CGDirectDisplayID,
+        dx: CGFloat
+    ) {
+        guard let controller, controller.motionPolicy.animationsEnabled, !entries.isEmpty else { return }
+
+        var statesByToken: [WindowToken: WindowState] = [:]
+        for state in controller.workspaceManager.entries(in: workspaceId) {
+            statesByToken[state.token] = state
+        }
+
+        let now = CACurrentMediaTime()
+        let refreshRate = layoutState.refreshRateByDisplay[displayId] ?? 60.0
+        var animations = layoutState.slideAnimationsByDisplay[displayId] ?? [:]
+        var started = 0
+
+        for (token, targetFrame) in entries {
+            guard let entry = statesByToken[token] else { continue }
+            guard controller.workspaceManager.hiddenState(for: token) != nil else { continue }
+            guard animations[entry.windowId] == nil else { continue }
+            let fromFrame = targetFrame.offsetBy(dx: dx, dy: 0)
+            animations[entry.windowId] = LayoutState.SlideAnimation(
+                windowId: entry.windowId,
+                token: token,
+                workspaceId: workspaceId,
+                fromFrame: fromFrame,
+                displacement: CGPoint(x: -dx, y: 0),
+                animation: SpringAnimation(
+                    from: 0,
+                    to: 1,
+                    startTime: now,
+                    config: .balanced.with(epsilon: 0.01, velocityEpsilon: 0.1),
+                    displayRefreshRate: refreshRate
+                ),
+                completionPlan: nil,
+                isIncoming: true
+            )
+            started += 1
+        }
+
+        guard started > 0 else { return }
+        layoutState.slideAnimationsByDisplay[displayId] = animations
+        Log.layout.info("slide-in started windows=\(started) dx=\(Int(dx))")
+
+        if let displayLink = getOrCreateDisplayLink(for: displayId) {
+            displayLink.add(to: .main, forMode: .common)
+        }
+    }
+
+    private func hasSlideAnimation(windowId: Int) -> Bool {
+        layoutState.slideAnimationsByDisplay.values.contains { $0[windowId] != nil }
+    }
+
+    func hasIncomingSlide(for workspaceId: WorkspaceDescriptor.ID) -> Bool {
+        layoutState.slideAnimationsByDisplay.values.contains { animations in
+            animations.values.contains { $0.isIncoming && $0.workspaceId == workspaceId }
+        }
     }
 
     func applyLayoutForWorkspaces(_ workspaceIds: Set<WorkspaceDescriptor.ID>) {
@@ -2658,6 +2784,11 @@ import QuartzCore
     fileprivate func applyPositionPlans(_ plans: [WindowPositionPlan], animationTick: Bool = false) {
         guard let controller, !plans.isEmpty else { return }
 
+        // Windows with an in-flight slide own their position; an instant park or
+        // reassert write here would snap them mid-animation.
+        let plans = plans.filter { !hasSlideAnimation(windowId: $0.entry.windowId) }
+        guard !plans.isEmpty else { return }
+
         controller.axManager.applyPositionsViaSkyLight(
             plans.map { (windowId: $0.entry.windowId, origin: $0.origin) },
             allowInactive: true
@@ -2686,6 +2817,7 @@ import QuartzCore
                || abs(observedOrigin.y - plan.origin.y) > verifyEpsilon
             {
                 FallbackFiringRecorder.shared.note(.skylight, "moveAXFallback")
+                Log.layout.info("park skylight-move missed, AX fallback windowId=\(plan.entry.windowId) pid=\(plan.entry.pid)")
                 let fallbackFrame = CGRect(origin: plan.origin, size: plan.frameSize)
                 FrameApplyTrace.shared.record(
                     .init(
@@ -2875,9 +3007,8 @@ import QuartzCore
             controller.axManager.suppressFrameWrites([frameEntry])
             if animated, startSlideOutAnimation(entry: entry, plan: plan, monitor: monitor) {
                 // slide animation parks the window over the next few frames
-            } else if hasSlideAnimation(windowId: entry.windowId, displayId: monitor.displayId) {
-                // an in-flight slide already owns this window's frame; don't snap it
             } else {
+                // applyPositionPlans itself skips windows with an in-flight slide
                 applyPositionPlans([plan])
             }
         case let .alreadyHidden(hiddenState):
@@ -2885,6 +3016,7 @@ import QuartzCore
             controller.axManager.cancelPendingFrameJobs([frameEntry])
             controller.axManager.suppressFrameWrites([frameEntry])
         case .unavailable:
+            Log.layout.error("hide unresolved (no frame) windowId=\(entry.windowId) pid=\(entry.pid) reason=\(reason)")
             controller.axManager.cancelPendingFrameJobs([frameEntry])
             controller.axManager.suppressFrameWrites([frameEntry])
         }
@@ -3358,6 +3490,7 @@ import QuartzCore
         else {
             return
         }
+        Log.layout.error("reveal failed windowId=\(windowId) pid=\(pendingTransaction.pid) target=\(Int(pendingTransaction.targetFrame.origin.x)),\(Int(pendingTransaction.targetFrame.origin.y)) \(Int(pendingTransaction.targetFrame.width))x\(Int(pendingTransaction.targetFrame.height))")
         if let transactionId, pendingTransaction.id != transactionId {
             pendingRevealTransactionsByWindowId[windowId] = pendingTransaction
             return

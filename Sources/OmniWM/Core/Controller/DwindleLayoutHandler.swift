@@ -1084,16 +1084,22 @@ import QuartzCore
             fullscreenScreen: snapshot.monitor.fullscreenLayoutFrame
         )
 
-        // Workspace slide: seed every incoming window one slide-width off its target so
-        // the normal move-animation pipeline carries the whole workspace in from that edge.
+        // Workspace slide: windows stay hidden while SkyLight moves carry them in from
+        // the travel edge; restores are gated until the slide completes, then the
+        // completion relayout performs the verified reveal on settled windows.
         if snapshot.isActiveWorkspace,
            let slide = controller?.layoutRefreshController.takeIncomingSlide(for: snapshot.workspaceId)
         {
-            for (token, frame) in newFrames {
-                let seeded = frame.offsetBy(dx: slide.dx, dy: 0)
-                oldFrames[token] = seeded
-                previousTargetFrames[token] = seeded
+            let slideEntries = snapshot.windows.compactMap { window -> (WindowToken, CGRect)? in
+                guard window.hiddenState != nil, let frame = newFrames[window.token] else { return nil }
+                return (window.token, frame)
             }
+            controller?.layoutRefreshController.startSlideInAnimations(
+                entries: slideEntries,
+                workspaceId: snapshot.workspaceId,
+                displayId: snapshot.monitor.displayId,
+                dx: slide.dx
+            )
         }
 
         if !removedTokens.isEmpty {
@@ -1128,7 +1134,8 @@ import QuartzCore
             engine: engine,
             workspaceId: snapshot.workspaceId,
             preferredHideSide: snapshot.preferredHideSide,
-            canRestoreHiddenWorkspaceWindows: snapshot.isActiveWorkspace,
+            canRestoreHiddenWorkspaceWindows: snapshot.isActiveWorkspace
+                && !(controller?.layoutRefreshController.hasIncomingSlide(for: snapshot.workspaceId) ?? false),
             scale: snapshot.monitor.scale,
             reassertHidden: true,
             pendingParkWindowIds: controller?.axManager.pendingParkWindowIds ?? []
@@ -1167,7 +1174,8 @@ import QuartzCore
             engine: engine,
             workspaceId: snapshot.workspaceId,
             preferredHideSide: snapshot.preferredHideSide,
-            canRestoreHiddenWorkspaceWindows: snapshot.isActiveWorkspace,
+            canRestoreHiddenWorkspaceWindows: snapshot.isActiveWorkspace
+                && !(controller?.layoutRefreshController.hasIncomingSlide(for: snapshot.workspaceId) ?? false),
             scale: snapshot.monitor.scale,
             reassertHidden: true,
             pendingParkWindowIds: controller?.axManager.pendingParkWindowIds ?? []

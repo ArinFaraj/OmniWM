@@ -904,7 +904,11 @@ final class WorkspaceNavigationHandler {
         }
         let currentWorkspaceId = controller.workspaceManager.workspace(for: token)
         let transferResult = transferWindowFromSourceEngine(token: token, from: currentWorkspaceId, to: target.id)
-        guard transferResult.succeeded else { return }
+        guard transferResult.succeeded else {
+            Log.layout.error("window transfer failed token=\(token) to=\(target.name)")
+            return
+        }
+        Log.layout.info("window moved token=\(token) to workspace=\(target.name) follow=\(controller.settings.focusFollowsWindowToMonitor)")
         if let currentWorkspaceId {
             recoverSourceFocus(after: transferResult, from: currentWorkspaceId)
         }
