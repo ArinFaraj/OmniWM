@@ -9,12 +9,22 @@ struct AXWindowRef: Hashable, @unchecked Sendable {
     let element: AXUIElement
     let windowId: Int
 
+    // Hard cap on every cross-process AX call made on this window. Without it a single
+    // unresponsive app (common right after an Accessibility grant, when apps re-register
+    // AX support) can block a synchronous AX call for many seconds on the main thread -
+    // and the main thread also serves the blocking input taps, so that stall freezes
+    // input for the whole session. 1s bounds any single hang; higher-level code yields
+    // between windows so hitches stay isolated.
+    static let messagingTimeout: Float = 1.0
+
     init(element: AXUIElement, windowId: Int) {
+        AXUIElementSetMessagingTimeout(element, Self.messagingTimeout)
         self.element = element
         self.windowId = windowId
     }
 
     init(element: AXUIElement) throws {
+        AXUIElementSetMessagingTimeout(element, Self.messagingTimeout)
         self.element = element
         var value: CGWindowID = 0
         let result = _AXUIElementGetWindow(element, &value)

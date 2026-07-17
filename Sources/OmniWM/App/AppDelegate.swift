@@ -54,10 +54,29 @@ public final class AppDelegate: NSObject, NSApplicationDelegate {
     private var updateCoordinator: (any AppUpdateCoordinating)?
     private var runtimeStateStore: RuntimeStateStore?
     private var launchOverlayController: LaunchOverlayController?
+    private var panicSignalSource: DispatchSourceSignal?
 
     public func applicationDidFinishLaunching(_: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
+        installPanicSignalHandler()
         bootstrapApplication()
+    }
+
+    /// Emergency input-unfreeze: `kill -USR1 <pid>` force-disables every blocking event
+    /// tap from a background queue, so it works even when the main thread is wedged (the
+    /// exact situation where a stalled tap freezes session-wide input). Input returns
+    /// immediately and the process stays alive - a safer escape than `kill -9`.
+    private func installPanicSignalHandler() {
+        signal(SIGUSR1, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(
+            signal: SIGUSR1,
+            queue: DispatchQueue.global(qos: .userInteractive)
+        )
+        source.setEventHandler {
+            EmergencyTapControl.disableAll()
+        }
+        source.resume()
+        panicSignalSource = source
     }
 
     public func applicationShouldTerminate(_: NSApplication) -> NSApplication.TerminateReply {

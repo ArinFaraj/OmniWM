@@ -1705,7 +1705,18 @@ import QuartzCore
         var decisionBasedRemovals: [WindowToken] = []
         let focusedWorkspaceId = controller.activeWorkspace()?.id
 
+        // This loop does a synchronous cross-process AX read per window. On the very first
+        // start after an Accessibility grant it runs over every window of every app while
+        // those apps are busiest - and it shares the main thread with the blocking input
+        // taps. Yield every few windows so the runloop services queued input between reads
+        // instead of running one unbroken stretch that would freeze the session.
+        var classifiedSinceYield = 0
         for (ax, pid, winId) in windows {
+            classifiedSinceYield += 1
+            if classifiedSinceYield >= 4 {
+                classifiedSinceYield = 0
+                await Task.yield()
+            }
             let bundleId = controller.appInfoCache.bundleId(for: pid)
                 ?? NSRunningApplication(processIdentifier: pid)?.bundleIdentifier
             if let bundleId {

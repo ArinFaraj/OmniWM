@@ -119,6 +119,7 @@ final class MouseEventHandler {
     }
 
     nonisolated(unsafe) weak static var _instance: MouseEventHandler?
+    static let mouseTapBreaker = TapReEnableBreaker(label: "mouse")
 
     weak var controller: WMController?
     var state = State()
@@ -193,7 +194,9 @@ final class MouseEventHandler {
         let callback: CGEventTapCallBack = { _, type, event, _ in
             if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
                 InputTapHealth.recordTapDisabled(mouse: true, byTimeout: type == .tapDisabledByTimeout)
-                if let tap = MouseEventHandler._instance?.state.eventTap {
+                let allowReEnable = type != .tapDisabledByTimeout
+                    || MouseEventHandler.mouseTapBreaker.shouldReEnable()
+                if allowReEnable, let tap = MouseEventHandler._instance?.state.eventTap {
                     CGEvent.tapEnable(tap: tap, enable: true)
                 }
                 Task { @MainActor in
@@ -223,6 +226,7 @@ final class MouseEventHandler {
             } else {
                 FallbackFiringRecorder.shared.note(.input, "mouseTapRunLoopSourceFailed")
             }
+            EmergencyTapControl.register(tap)
             CGEvent.tapEnable(tap: tap, enable: true)
         } else {
             FallbackFiringRecorder.shared.note(.input, "mouseTapCreateFailed")
@@ -254,6 +258,7 @@ final class MouseEventHandler {
             state.runLoopSource = nil
         }
         if let tap = state.eventTap {
+            EmergencyTapControl.unregister(tap)
             CGEvent.tapEnable(tap: tap, enable: false)
             state.eventTap = nil
         }

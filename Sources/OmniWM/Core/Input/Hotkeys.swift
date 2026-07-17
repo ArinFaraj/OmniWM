@@ -208,6 +208,7 @@ final class HotkeyCenter {
     private var sideSpecificDispatch: [CommandHotkeyTapMatcher.Entry] = []
     private var suppressedHotkeyKeyCodes: Set<UInt32> = []
     private var hyperTriggerTap: CFMachPort?
+    private let hyperTriggerBreaker = TapReEnableBreaker(label: "hyper")
     private var hyperTriggerRunLoopSource: CFRunLoopSource?
     private var hyperTrigger = HyperTriggerStateMachine(trigger: .none, capsLockRemapped: false)
     private let capsLockHyperRemapper = CapsLockHyperRemapper()
@@ -512,6 +513,7 @@ final class HotkeyCenter {
             return false
         }
         CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        EmergencyTapControl.register(tap)
         CGEvent.tapEnable(tap: tap, enable: true)
         return true
     }
@@ -524,6 +526,7 @@ final class HotkeyCenter {
             hyperTriggerRunLoopSource = nil
         }
         if let tap = hyperTriggerTap {
+            EmergencyTapControl.unregister(tap)
             CGEvent.tapEnable(tap: tap, enable: false)
             hyperTriggerTap = nil
         }
@@ -533,7 +536,7 @@ final class HotkeyCenter {
         switch type {
         case .tapDisabledByTimeout:
             InputTapHealth.recordTapDisabled(mouse: false, byTimeout: true)
-            if let tap = hyperTriggerTap {
+            if let tap = hyperTriggerTap, hyperTriggerBreaker.shouldReEnable() {
                 CGEvent.tapEnable(tap: tap, enable: true)
             }
             hyperTrigger.reset()
