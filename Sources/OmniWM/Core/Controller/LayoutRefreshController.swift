@@ -148,12 +148,7 @@ import QuartzCore
             func currentFrame(at time: TimeInterval) -> CGRect {
                 let clamped = min(max(progress(at: time), 0), 1)
                 if let toFrame {
-                    return CGRect(
-                        x: fromFrame.origin.x + (toFrame.origin.x - fromFrame.origin.x) * CGFloat(clamped),
-                        y: fromFrame.origin.y + (toFrame.origin.y - fromFrame.origin.y) * CGFloat(clamped),
-                        width: fromFrame.width + (toFrame.width - fromFrame.width) * CGFloat(clamped),
-                        height: fromFrame.height + (toFrame.height - fromFrame.height) * CGFloat(clamped)
-                    )
+                    return WindowAnimationGeometry.interpolate(fromFrame, toFrame, CGFloat(clamped))
                 }
                 let offset = CGPoint(
                     x: displacement.x * CGFloat(clamped),
@@ -530,11 +525,10 @@ import QuartzCore
         // early - it can never leave a live window mis-sized.
         let closeScale: CGFloat = 1.0 - 0.18 * reduceMotionScale
         let liftOffset = 10.0 * reduceMotionScale
-        let toFrame = CGRect(
-            x: frame.midX - frame.width * closeScale / 2.0,
-            y: frame.midY - frame.height * closeScale / 2.0 - liftOffset,
-            width: frame.width * closeScale,
-            height: frame.height * closeScale
+        let toFrame = WindowAnimationGeometry.popOutFrame(
+            from: frame,
+            scale: closeScale,
+            lift: liftOffset
         )
 
         let now = CACurrentMediaTime()

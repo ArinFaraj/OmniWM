@@ -1791,13 +1791,7 @@ final class DwindleLayoutEngine {
                     )
                 }
             } else if popIn, newTokens.contains(handle) {
-                let scale: CGFloat = 0.85
-                let popStart = CGRect(
-                    x: newFrame.midX - newFrame.width * scale / 2.0,
-                    y: newFrame.midY - newFrame.height * scale / 2.0,
-                    width: newFrame.width * scale,
-                    height: newFrame.height * scale
-                )
+                let popStart = WindowAnimationGeometry.popInStartFrame(tile: newFrame, scale: 0.85)
                 node.animateFrom(
                     oldFrame: popStart,
                     newFrame: newFrame,
