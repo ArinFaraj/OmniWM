@@ -132,6 +132,10 @@ import QuartzCore
             let fromFrame: CGRect
             let displacement: CGPoint
             let animation: SpringAnimation
+            // When set, the frame interpolates fromFrame -> toFrame (used by the close
+            // pop-out to shrink + lift the dying window). When nil, the legacy
+            // displacement (pure translate) path is used (workspace-slide reuse).
+            var toFrame: CGRect? = nil
 
             func progress(at time: TimeInterval) -> Double {
                 animation.value(at: time)
@@ -143,6 +147,14 @@ import QuartzCore
 
             func currentFrame(at time: TimeInterval) -> CGRect {
                 let clamped = min(max(progress(at: time), 0), 1)
+                if let toFrame {
+                    return CGRect(
+                        x: fromFrame.origin.x + (toFrame.origin.x - fromFrame.origin.x) * CGFloat(clamped),
+                        y: fromFrame.origin.y + (toFrame.origin.y - fromFrame.origin.y) * CGFloat(clamped),
+                        width: fromFrame.width + (toFrame.width - fromFrame.width) * CGFloat(clamped),
+                        height: fromFrame.height + (toFrame.height - fromFrame.height) * CGFloat(clamped)
+                    )
+                }
                 let offset = CGPoint(
                     x: displacement.x * CGFloat(clamped),
                     y: displacement.y * CGFloat(clamped)
@@ -512,8 +524,18 @@ import QuartzCore
         guard let frame = fastFrame(for: entry.token, axRef: entry.axRef) else { return }
 
         let reduceMotionScale: CGFloat = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0.25 : 1.0
-        let closeOffset = 12.0 * reduceMotionScale
-        let displacement = CGPoint(x: 0, y: -closeOffset)
+        // Hyprland-style pop-out: the dying window shrinks toward its center and lifts
+        // slightly as it goes. Reduce Motion shrinks the effect. The window is being
+        // destroyed regardless, so if an app refuses to shrink the animation just stops
+        // early - it can never leave a live window mis-sized.
+        let closeScale: CGFloat = 1.0 - 0.18 * reduceMotionScale
+        let liftOffset = 10.0 * reduceMotionScale
+        let toFrame = CGRect(
+            x: frame.midX - frame.width * closeScale / 2.0,
+            y: frame.midY - frame.height * closeScale / 2.0 - liftOffset,
+            width: frame.width * closeScale,
+            height: frame.height * closeScale
+        )
 
         let now = CACurrentMediaTime()
         let refreshRate = layoutState.refreshRateByDisplay[monitor.displayId] ?? 60.0
@@ -531,8 +553,9 @@ import QuartzCore
             windowId: entry.windowId,
             axRef: entry.axRef,
             fromFrame: frame,
-            displacement: displacement,
-            animation: animation
+            displacement: .zero,
+            animation: animation,
+            toFrame: toFrame
         )
         layoutState.closingAnimationsByDisplay[monitor.displayId] = animations
 

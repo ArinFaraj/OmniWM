@@ -1237,10 +1237,9 @@ final class AXEventHandler {
             _ = activeWindowCloseFocusRecoveryWorkspaceId()
             closeRecoveryArmed = false
         }
-        let layoutType = controller.workspaceManager.descriptor(for: entry.workspaceId)
-            .map { controller.settings.layoutType(for: $0.name) } ?? .defaultLayout
-        guard layoutType != .dwindle,
-              let monitor = controller.workspaceManager.monitor(for: entry.workspaceId),
+        // Close pop-out now runs for dwindle too (previously niri-only). The dying window
+        // is animated independently of the layout tree, so it works in either layout.
+        guard let monitor = controller.workspaceManager.monitor(for: entry.workspaceId),
               controller.workspaceManager.activeWorkspace(on: monitor.id)?.id == entry.workspaceId
         else {
             return (shouldRecoverFocus, closeRecoveryArmed)

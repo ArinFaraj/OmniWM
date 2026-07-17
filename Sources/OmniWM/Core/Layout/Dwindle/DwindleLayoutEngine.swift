@@ -68,6 +68,10 @@ final class DwindleLayoutEngine {
 
     var windowMovementAnimationConfig: CubicConfig = .hyprlandDwindle
 
+    // Grow-in pop-in for a single newly-opened window (Hyprland windowsIn). Safe: reuses
+    // the frame-animation path and always lands at the real tile frame.
+    static let windowPopInEnabled = true
+
     func root(for workspaceId: WorkspaceDescriptor.ID) -> DwindleNode? {
         states[workspaceId]?.root
     }
@@ -1760,21 +1764,46 @@ final class DwindleLayoutEngine {
         motion: MotionSnapshot
     ) {
         guard let state = states[workspaceId] else { return }
+
+        // Brand-new windows have no prior frame, so historically they appeared instantly.
+        // A single newly-opened window now grows into its tile from a smaller centered
+        // frame (Hyprland-style pop-in) using the same proven frame-animation path. It
+        // always ends at newFrame regardless of the animation, so it can never strand.
+        // Bulk appearances (workspace bootstrap / first show) skip the pop-in to avoid
+        // every window popping at once.
+        let newTokens = newFrames.keys.filter { oldFrames[$0] == nil }
+        let popIn = Self.windowPopInEnabled && motion.animationsEnabled && newTokens.count == 1
+
         for (handle, newFrame) in newFrames {
-            guard let oldFrame = oldFrames[handle],
-                  let node = state.leafByToken[handle] else { continue }
+            guard let node = state.leafByToken[handle] else { continue }
 
-            let targetChanged = previousTargetFrames[handle].map {
-                frameChanged($0, newFrame)
-            } ?? true
-
-            if targetChanged {
+            if let oldFrame = oldFrames[handle] {
+                let targetChanged = previousTargetFrames[handle].map {
+                    frameChanged($0, newFrame)
+                } ?? true
+                if targetChanged {
+                    node.animateFrom(
+                        oldFrame: oldFrame,
+                        newFrame: newFrame,
+                        startTime: startTime,
+                        config: windowMovementAnimationConfig,
+                        animated: motion.animationsEnabled
+                    )
+                }
+            } else if popIn, newTokens.contains(handle) {
+                let scale: CGFloat = 0.85
+                let popStart = CGRect(
+                    x: newFrame.midX - newFrame.width * scale / 2.0,
+                    y: newFrame.midY - newFrame.height * scale / 2.0,
+                    width: newFrame.width * scale,
+                    height: newFrame.height * scale
+                )
                 node.animateFrom(
-                    oldFrame: oldFrame,
+                    oldFrame: popStart,
                     newFrame: newFrame,
                     startTime: startTime,
                     config: windowMovementAnimationConfig,
-                    animated: motion.animationsEnabled
+                    animated: true
                 )
             }
         }
