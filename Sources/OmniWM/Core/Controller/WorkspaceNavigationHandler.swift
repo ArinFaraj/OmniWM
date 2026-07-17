@@ -545,11 +545,20 @@ final class WorkspaceNavigationHandler {
         )
     }
 
+    // Workspace slide is gated off. Driving real windows across the screen through
+    // OmniWM's park/reveal path depends on SkyLight transaction moves that silently miss
+    // on macOS 26.x (every switch logs "park skylight-move missed"), so windows land
+    // short of their park and leave a visible sliver on inactive workspaces. Stock instant
+    // switching parks correctly. Flip this to true to re-enable once slides drive purely
+    // through AX writes (SkyLight-independent) end to end.
+    private static let workspaceSlideEnabled = false
+
     private func beginWorkspaceSlideIfNeeded(
         from previousWorkspace: WorkspaceDescriptor?,
         to targetWorkspace: WorkspaceDescriptor,
         monitor: Monitor?
     ) {
+        guard Self.workspaceSlideEnabled else { return }
         guard let controller, let monitor, let previousWorkspace,
               previousWorkspace.id != targetWorkspace.id,
               let previousNumber = Int(previousWorkspace.name),
