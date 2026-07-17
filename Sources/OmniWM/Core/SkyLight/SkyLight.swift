@@ -65,6 +65,7 @@ final class SkyLight {
     private typealias SetWindowShapeFunc = @convention(c) (Int32, UInt32, Float, Float, CFTypeRef) -> CGError
     private typealias SetWindowResolutionFunc = @convention(c) (Int32, UInt32, Float) -> CGError
     private typealias SetWindowOpacityFunc = @convention(c) (Int32, UInt32, Int32) -> CGError
+    private typealias SetWindowTransformFunc = @convention(c) (Int32, UInt32, CGAffineTransform) -> CGError
     private typealias SetWindowTagsFunc = @convention(c) (Int32, UInt32, UnsafePointer<UInt64>, Int32) -> CGError
     private typealias FlushWindowContentRegionFunc = @convention(c) (Int32, UInt32, CFTypeRef?) -> CGError
     private typealias NewRegionWithRectFunc = @convention(c) (UnsafePointer<CGRect>, UnsafeMutablePointer<CFTypeRef?>)
@@ -148,6 +149,9 @@ final class SkyLight {
     private let setWindowShape: SetWindowShapeFunc
     private let setWindowResolution: SetWindowResolutionFunc
     private let setWindowOpacity: SetWindowOpacityFunc
+    // Optional (not resolve()'d) so a missing symbol degrades to no-op instead of
+    // crashing the WM. Proven present + working on owned windows on macOS 26.x.
+    private let setWindowTransformSym: SetWindowTransformFunc?
     private let setWindowTags: SetWindowTagsFunc
     private let flushWindowContentRegion: FlushWindowContentRegionFunc
     private let newRegionWithRect: NewRegionWithRectFunc
@@ -240,6 +244,8 @@ final class SkyLight {
         setWindowShape = resolve("SLSSetWindowShape", as: SetWindowShapeFunc.self)
         setWindowResolution = resolve("SLSSetWindowResolution", as: SetWindowResolutionFunc.self)
         setWindowOpacity = resolve("SLSSetWindowOpacity", as: SetWindowOpacityFunc.self)
+        setWindowTransformSym = dlsym(lib, "SLSSetWindowTransform")
+            .map { unsafeBitCast($0, to: SetWindowTransformFunc.self) }
         setWindowTags = resolve("SLSSetWindowTags", as: SetWindowTagsFunc.self)
         flushWindowContentRegion = resolve("SLSFlushWindowContentRegion", as: FlushWindowContentRegionFunc.self)
         newRegionWithRect = resolve("CGSNewRegionWithRect", as: NewRegionWithRectFunc.self)
@@ -721,7 +727,18 @@ final class SkyLight {
         return ok
     }
 
+    /// Apply an affine transform to a window OmniWM OWNS (e.g. a proxy/border window).
+    /// GPU-composited by WindowServer, animatable at refresh rate. No-ops on foreign
+    /// windows (the ownership model reserves that for the owning connection). This is the
+    /// core primitive for the owned-proxy animation backend.
     @discardableResult
+    func setWindowTransform(_ wid: UInt32, _ transform: CGAffineTransform) -> Bool {
+        guard let setWindowTransformSym else { return false }
+        let cid = getMainConnectionID()
+        guard cid != 0 else { return false }
+        return setWindowTransformSym(cid, wid, transform) == .success
+    }
+
     func configureWindow(_ wid: UInt32, resolution: Float, opaque: Bool) -> (resolution: Bool, opacity: Bool) {
         let cid = getMainConnectionID()
         guard cid != 0 else { return (false, false) }

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2026 BarutSRB — https://github.com/BarutSRB/OmniWM
 
+import AppKit
 import Foundation
 
 struct SpringConfig: Equatable {
@@ -97,7 +98,10 @@ struct SpringConfig: Equatable {
     static let `default` = SpringConfig.snappy
 
     func resolvedForReduceMotion(_ reduceMotion: Bool) -> SpringConfig {
-        self
+        // Under Reduce Motion, collapse to a stiff critically-damped spring so motion
+        // settles near-instantly. Previously this returned self (a dead no-op), so no
+        // spring-driven animation honored the accessibility setting.
+        reduceMotion ? .reducedMotion : self
     }
 
     func with(epsilon: Double, velocityEpsilon: Double) -> SpringConfig {
@@ -135,7 +139,9 @@ final class SpringAnimation {
         self.displayRefreshRate = displayRefreshRate
         self.initialVelocity = initialVelocity
 
-        let resolvedConfig = config.resolvedForReduceMotion(false)
+        let resolvedConfig = config.resolvedForReduceMotion(
+            NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        )
         self.config = resolvedConfig
         displacement = to - from
         duration = Self.duration(
