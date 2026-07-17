@@ -317,6 +317,19 @@ enum AXWindowService {
         return .sizeThenPosition
     }
 
+    // Position-only write for animation ticks: one AX call, no resize churn. The full
+    // frame is still required because the AX coordinate flip needs the window height.
+    static func setPositionOnly(_ window: AXWindowRef, frame: CGRect) -> Bool {
+        let axFrame = convertToAX(frame)
+        var position = CGPoint(x: axFrame.origin.x, y: axFrame.origin.y)
+        guard let positionValue = AXValueCreate(.cgPoint, &position) else { return false }
+        return AXUIElementSetAttributeValue(
+            window.element,
+            kAXPositionAttribute as CFString,
+            positionValue
+        ) == .success
+    }
+
     static func setFrame(
         _ window: AXWindowRef,
         frame: CGRect,

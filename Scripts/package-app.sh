@@ -75,10 +75,19 @@ if [ "$SIGN_AND_NOTARIZE" = "true" ]; then
   rm -f "$ZIP_PATH"
   echo "Done! $APP_DIR is signed and notarized."
 elif [ "$SIGN_AND_NOTARIZE" = "dev" ]; then
-  if security find-identity -v -p codesigning | grep -qF "$SIGNING_IDENTITY"; then
+  if [ -n "${OMNIWM_DEV_SIGN_IDENTITY:-}" ]; then
+    IDENTITY="$OMNIWM_DEV_SIGN_IDENTITY"
+  elif security find-identity -v -p codesigning | grep -qF "$SIGNING_IDENTITY"; then
     IDENTITY="$SIGNING_IDENTITY"
   else
-    IDENTITY="-"
+    # Prefer any stable identity over adhoc: adhoc re-signs get a new cdhash every
+    # build, so macOS drops the Accessibility grant on every rebuild.
+    APPLE_DEV_IDENTITY=$(security find-identity -v -p codesigning | sed -n 's/.*"\(Apple Development: [^"]*\)".*/\1/p' | head -1)
+    if [ -n "$APPLE_DEV_IDENTITY" ]; then
+      IDENTITY="$APPLE_DEV_IDENTITY"
+    else
+      IDENTITY="-"
+    fi
   fi
   echo "Signing $APP_DIR for development (identity: $IDENTITY)..."
   codesign --force --sign "$IDENTITY" "$APP_DIR/Contents/MacOS/omniwmctl"

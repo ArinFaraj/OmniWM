@@ -169,6 +169,7 @@ import QuartzCore
         fileprivate struct SlideAnimation {
             let windowId: Int
             let token: WindowToken
+            let axRef: AXWindowRef
             let workspaceId: WorkspaceDescriptor.ID
             let fromFrame: CGRect
             let displacement: CGPoint
@@ -627,10 +628,8 @@ import QuartzCore
         }
 
         var remaining: [Int: LayoutState.SlideAnimation] = [:]
-        var moves: [(windowId: Int, origin: CGPoint)] = []
         var completedParkPlans: [WindowPositionPlan] = []
         var completedIncomingWorkspaces: Set<WorkspaceDescriptor.ID> = []
-        moves.reserveCapacity(animations.count)
 
         for (windowId, slide) in animations {
             guard controller.workspaceManager.hiddenState(for: slide.token) != nil else {
@@ -640,7 +639,8 @@ import QuartzCore
                 continue
             }
             if slide.isComplete(at: targetTime) {
-                moves.append((windowId, slide.currentOrigin(at: targetTime)))
+                // Final placement comes from the verified reveal (incoming) or the
+                // verified park plan (outgoing); no tick write needed.
                 if slide.isIncoming {
                     completedIncomingWorkspaces.insert(slide.workspaceId)
                 } else if let plan = slide.completionPlan {
@@ -648,12 +648,16 @@ import QuartzCore
                 }
                 continue
             }
-            moves.append((windowId, slide.currentOrigin(at: targetTime)))
+            // SkyLight moves silently miss on this macOS (see the park fallback logs),
+            // so drive the slide with direct AX position writes like the close animation.
+            _ = AXWindowService.setPositionOnly(
+                slide.axRef,
+                frame: CGRect(
+                    origin: slide.currentOrigin(at: targetTime),
+                    size: slide.fromFrame.size
+                )
+            )
             remaining[windowId] = slide
-        }
-
-        if !moves.isEmpty {
-            controller.axManager.applyPositionsViaSkyLight(moves, allowInactive: true)
         }
 
         if remaining.isEmpty {
@@ -703,6 +707,7 @@ import QuartzCore
         animations[entry.windowId] = LayoutState.SlideAnimation(
             windowId: entry.windowId,
             token: entry.token,
+            axRef: entry.axRef,
             workspaceId: entry.workspaceId,
             fromFrame: fromFrame,
             displacement: displacement,
@@ -750,6 +755,7 @@ import QuartzCore
             animations[entry.windowId] = LayoutState.SlideAnimation(
                 windowId: entry.windowId,
                 token: token,
+                axRef: entry.axRef,
                 workspaceId: workspaceId,
                 fromFrame: fromFrame,
                 displacement: CGPoint(x: -dx, y: 0),
@@ -2866,6 +2872,12 @@ import QuartzCore
             ?? controller.axManager.lastAppliedFrame(for: entry.windowId)
         if resolvedFrame == nil, !animationTick {
             resolvedFrame = try? AXWindowService.frame(entry.axRef)
+        }
+        if resolvedFrame == nil, !animationTick {
+            // Some windows (WhatsApp) never answer AX frame reads. Park them against a
+            // synthesized monitor-sized frame instead of leaving them visible forever.
+            resolvedFrame = monitor.visibleFrame
+            Log.layout.info("hide frame unresolved, synthesizing windowId=\(entry.windowId) pid=\(entry.pid)")
         }
         guard var frame = resolvedFrame else {
             return .unavailable
