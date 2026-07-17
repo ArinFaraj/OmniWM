@@ -1,16 +1,10 @@
 {
-  "generatedAt": "2026-06-23T00:00:00Z",
-  "os": "fixture",
-  "appVersion": "fixture",
-  "ax": {
-    "window": { "attributes": {}, "writable": [], "failed": [], "ignored": [] },
-    "app": { "attributes": {}, "writable": [], "failed": [], "ignored": [] }
-  },
-  "omniwm": {
+  "observation": {
     "tokenPid": 1000,
     "tokenWindowId": 1,
     "appName": "Standard App",
     "bundleId": "com.example.standard",
+    "rulesRevision": 1,
     "input": {
       "appName": "Standard App",
       "ax": {
@@ -26,14 +20,20 @@
         "bundleId": "com.example.standard",
         "attributeFetchSucceeded": true
       },
-      "appFullscreen": false,
-      "rules": []
+      "appFullscreen": false
     },
-    "expected": {
+    "observedDecision": {
       "disposition": "managed",
       "source": "heuristic",
       "heuristicReasons": [],
       "layoutDecisionKind": "fallbackLayout"
     }
+  },
+  "rules": [],
+  "expectedDecision": {
+    "disposition": "managed",
+    "source": "heuristic",
+    "heuristicReasons": [],
+    "layoutDecisionKind": "fallbackLayout"
   }
 }

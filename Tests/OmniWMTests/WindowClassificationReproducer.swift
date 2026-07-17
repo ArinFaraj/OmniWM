@@ -60,9 +60,12 @@ extension WindowServerInfoDTO {
 
 @MainActor
 enum WindowClassificationReproducer {
-    static func recompute(_ input: WindowClassificationInput) -> WindowClassificationExpectation {
+    static func recompute(
+        _ input: WindowClassificationInput,
+        rules: [AppRule]
+    ) -> WindowClassificationDecisionDTO {
         let engine = WindowRuleEngine()
-        engine.rebuild(rules: input.rules)
+        engine.rebuild(rules: rules)
         let facts = WindowRuleFacts(
             appName: input.appName,
             ax: input.ax.toModel(),
@@ -71,6 +74,6 @@ enum WindowClassificationReproducer {
         )
         let base = engine.decision(for: facts, token: nil, appFullscreen: input.appFullscreen)
         let final = WindowRuleEngine.applyingManualOverride(base, manualOverride: input.manualOverride)
-        return WindowClassificationExpectation(from: final)
+        return WindowClassificationDecisionDTO(from: final)
     }
 }

@@ -65,6 +65,31 @@ enum AXFrameWriteFailureReason: Equatable, Sendable {
     case verificationMismatch
     case cancelled
     case suppressed
+
+    var traceDescription: String {
+        switch self {
+        case .valueCreationFailed:
+            "valueCreationFailed"
+        case let .sizeWriteFailed(error):
+            "sizeWriteFailed(raw=\(error.rawValue))"
+        case let .positionWriteFailed(error):
+            "positionWriteFailed(raw=\(error.rawValue))"
+        case .staleElement:
+            "staleElement"
+        case .cacheMiss:
+            "cacheMiss"
+        case .contextUnavailable:
+            "contextUnavailable"
+        case .readbackFailed:
+            "readbackFailed"
+        case .verificationMismatch:
+            "verificationMismatch"
+        case .cancelled:
+            "cancelled"
+        case .suppressed:
+            "suppressed"
+        }
+    }
 }
 
 struct AXFrameWriteResult: Equatable, Sendable {
@@ -181,6 +206,55 @@ struct AXWindowFacts: Equatable, Sendable {
     let attributeFetchSucceeded: Bool
 }
 
+struct AXWindowDecisionEvidence: Equatable, Sendable {
+    let facts: AXWindowFacts
+    let sizeConstraints: WindowSizeConstraints
+
+    static func unavailable(
+        role: String? = nil,
+        subrole: String? = nil,
+        appPolicy: NSApplication.ActivationPolicy? = nil,
+        bundleId: String? = nil
+    ) -> Self {
+        Self(
+            facts: AXWindowFacts(
+                role: role,
+                subrole: subrole,
+                title: nil,
+                hasCloseButton: false,
+                hasFullscreenButton: false,
+                fullscreenButtonEnabled: nil,
+                hasZoomButton: false,
+                hasMinimizeButton: false,
+                appPolicy: appPolicy,
+                bundleId: bundleId,
+                attributeFetchSucceeded: false
+            ),
+            sizeConstraints: .unconstrained
+        )
+    }
+}
+
+struct AXWindowFactAttributeValues {
+    let role: String?
+    let subrole: String?
+    let title: String?
+    let closeButton: Any?
+    let fullscreenButton: Any?
+    let fullscreenButtonEnabled: Bool?
+    let zoomButton: Any?
+    let minimizeButton: Any?
+}
+
+struct AXWindowConstraintInputs {
+    let hasGrowArea: Bool
+    let hasZoomButton: Bool
+    let subrole: String?
+    let minSize: CGSize?
+    let maxSize: CGSize?
+    let currentSize: CGSize?
+}
+
 struct AXWindowHeuristicDisposition: Equatable, Sendable {
     let disposition: WindowDecisionDisposition
     let reasons: [AXWindowHeuristicReason]
@@ -214,6 +288,12 @@ enum AXWindowService {
         pinnedElementsLock.lock()
         defer { pinnedElementsLock.unlock() }
         pinnedElements.removeValue(forKey: windowId)
+    }
+
+    static func hasPinnedAXElement(for windowId: UInt32) -> Bool {
+        pinnedElementsLock.lock()
+        defer { pinnedElementsLock.unlock() }
+        return pinnedElements[windowId] != nil
     }
 
     private static func pinnedAXElement(for windowId: UInt32) -> AXUIElement? {
@@ -276,6 +356,21 @@ enum AXWindowService {
 
     static func windowId(_ window: AXWindowRef) -> Int {
         window.windowId
+    }
+
+    static func processIdentifier(_ window: AXWindowRef) -> pid_t? {
+        var pid: pid_t = 0
+        guard AXUIElementGetPid(window.element, &pid) == .success else { return nil }
+        return pid
+    }
+
+    static func isSizeSettable(_ window: AXWindowRef) -> Bool {
+        var settable = DarwinBoolean(false)
+        return AXUIElementIsAttributeSettable(
+            window.element,
+            kAXSizeAttribute as CFString,
+            &settable
+        ) == .success && settable.boolValue
     }
 
     static func frame(_ window: AXWindowRef) throws(AXErrorWrapper) -> CGRect {
@@ -538,19 +633,10 @@ enum AXWindowService {
               let valuesArray = values as? [Any?],
               valuesArray.count > WindowTypeAttributeIndex.minimizeButton.rawValue
         else {
-            return AXWindowFacts(
-                role: nil,
-                subrole: nil,
-                title: nil,
-                hasCloseButton: false,
-                hasFullscreenButton: false,
-                fullscreenButtonEnabled: nil,
-                hasZoomButton: false,
-                hasMinimizeButton: false,
+            return AXWindowDecisionEvidence.unavailable(
                 appPolicy: appPolicy,
-                bundleId: bundleId,
-                attributeFetchSucceeded: false
-            )
+                bundleId: bundleId
+            ).facts
         }
 
         func attributeValue(_ index: WindowTypeAttributeIndex) -> Any? {
@@ -558,28 +644,25 @@ enum AXWindowService {
             return valuesArray[index.rawValue]
         }
 
-        func hasResolvedAttribute(_ value: Any?) -> Bool {
-            guard let value else { return false }
-            return !(value is NSError)
-        }
-
         let fullscreenButtonElement = attributeValue(.fullScreenButton)
         var attributeFetchSucceeded = true
-        let hasFullscreenButton = hasResolvedAttribute(fullscreenButtonElement)
+        let hasFullscreenButton = resolvedAttribute(fullscreenButtonElement)
 
         var fullscreenButtonEnabled: Bool?
         if hasFullscreenButton, let fullscreenButtonElement {
             guard CFGetTypeID(fullscreenButtonElement as CFTypeRef) == AXUIElementGetTypeID() else {
                 attributeFetchSucceeded = false
-                return AXWindowFacts(
-                    role: attributeValue(.role) as? String,
-                    subrole: attributeValue(.subrole) as? String,
-                    title: includeTitle ? (attributeValue(.title) as? String) : nil,
-                    hasCloseButton: hasResolvedAttribute(attributeValue(.closeButton)),
-                    hasFullscreenButton: false,
-                    fullscreenButtonEnabled: nil,
-                    hasZoomButton: hasResolvedAttribute(attributeValue(.zoomButton)),
-                    hasMinimizeButton: hasResolvedAttribute(attributeValue(.minimizeButton)),
+                return makeWindowFacts(
+                    AXWindowFactAttributeValues(
+                        role: attributeValue(.role) as? String,
+                        subrole: attributeValue(.subrole) as? String,
+                        title: includeTitle ? (attributeValue(.title) as? String) : nil,
+                        closeButton: attributeValue(.closeButton),
+                        fullscreenButton: nil,
+                        fullscreenButtonEnabled: nil,
+                        zoomButton: attributeValue(.zoomButton),
+                        minimizeButton: attributeValue(.minimizeButton)
+                    ),
                     appPolicy: appPolicy,
                     bundleId: bundleId,
                     attributeFetchSucceeded: attributeFetchSucceeded
@@ -603,18 +686,71 @@ enum AXWindowService {
             }
         }
 
-        return AXWindowFacts(
-            role: attributeValue(.role) as? String,
-            subrole: attributeValue(.subrole) as? String,
-            title: includeTitle ? (attributeValue(.title) as? String) : nil,
-            hasCloseButton: hasResolvedAttribute(attributeValue(.closeButton)),
-            hasFullscreenButton: hasFullscreenButton,
-            fullscreenButtonEnabled: fullscreenButtonEnabled,
-            hasZoomButton: hasResolvedAttribute(attributeValue(.zoomButton)),
-            hasMinimizeButton: hasResolvedAttribute(attributeValue(.minimizeButton)),
+        return makeWindowFacts(
+            AXWindowFactAttributeValues(
+                role: attributeValue(.role) as? String,
+                subrole: attributeValue(.subrole) as? String,
+                title: includeTitle ? (attributeValue(.title) as? String) : nil,
+                closeButton: attributeValue(.closeButton),
+                fullscreenButton: fullscreenButtonElement,
+                fullscreenButtonEnabled: fullscreenButtonEnabled,
+                zoomButton: attributeValue(.zoomButton),
+                minimizeButton: attributeValue(.minimizeButton)
+            ),
             appPolicy: appPolicy,
             bundleId: bundleId,
             attributeFetchSucceeded: attributeFetchSucceeded
+        )
+    }
+
+    static func makeWindowFacts(
+        _ attributes: AXWindowFactAttributeValues,
+        appPolicy: NSApplication.ActivationPolicy?,
+        bundleId: String?,
+        attributeFetchSucceeded: Bool
+    ) -> AXWindowFacts {
+        AXWindowFacts(
+            role: attributes.role,
+            subrole: attributes.subrole,
+            title: attributes.title,
+            hasCloseButton: resolvedAttribute(attributes.closeButton),
+            hasFullscreenButton: resolvedAttribute(attributes.fullscreenButton),
+            fullscreenButtonEnabled: attributes.fullscreenButtonEnabled,
+            hasZoomButton: resolvedAttribute(attributes.zoomButton),
+            hasMinimizeButton: resolvedAttribute(attributes.minimizeButton),
+            appPolicy: appPolicy,
+            bundleId: bundleId,
+            attributeFetchSucceeded: attributeFetchSucceeded
+        )
+    }
+
+    static func resolvedAttribute(_ value: Any?) -> Bool {
+        guard let value else { return false }
+        return !(value is NSError)
+    }
+
+    static func sizeValue(_ value: Any?) -> CGSize? {
+        guard let value,
+              CFGetTypeID(value as CFTypeRef) == AXValueGetTypeID()
+        else {
+            return nil
+        }
+        var size = CGSize.zero
+        guard AXValueGetValue(value as! AXValue, .cgSize, &size) else { return nil }
+        return size
+    }
+
+    static func resolvedSizeConstraints(_ inputs: AXWindowConstraintInputs) -> WindowSizeConstraints {
+        let resizable = inputs.hasGrowArea
+            || inputs.hasZoomButton
+            || inputs.subrole == (kAXStandardWindowSubrole as String)
+        if !resizable {
+            return inputs.currentSize.map(WindowSizeConstraints.fixed(size:)) ?? .unconstrained
+        }
+        return WindowSizeConstraints(
+            minSize: inputs.minSize ?? CGSize(width: 100, height: 100),
+            maxSize: inputs.maxSize ?? .zero,
+            isFixed: false
         )
     }
 
@@ -711,8 +847,8 @@ enum AXWindowService {
         var hasGrowArea = false
         var hasZoomButton = false
         var subroleValue: String?
-        var minSize = CGSize(width: 100, height: 100)
-        var maxSize = CGSize.zero
+        var minSize: CGSize?
+        var maxSize: CGSize?
 
         if result == .success, let valuesArray = values as? [Any?] {
             if !valuesArray.isEmpty, valuesArray[0] != nil, !(valuesArray[0] is NSError) {
@@ -724,40 +860,23 @@ enum AXWindowService {
             if valuesArray.count > 2, let subrole = valuesArray[2] as? String {
                 subroleValue = subrole
             }
-            if valuesArray.count > 3, let minValue = valuesArray[3],
-               CFGetTypeID(minValue as CFTypeRef) == AXValueGetTypeID()
-            {
-                var size = CGSize.zero
-                if AXValueGetValue(minValue as! AXValue, .cgSize, &size) {
-                    minSize = size
-                }
+            if valuesArray.count > 3 {
+                minSize = sizeValue(valuesArray[3])
             }
-            if valuesArray.count > 4, let maxValue = valuesArray[4],
-               CFGetTypeID(maxValue as CFTypeRef) == AXValueGetTypeID()
-            {
-                var size = CGSize.zero
-                if AXValueGetValue(maxValue as! AXValue, .cgSize, &size) {
-                    maxSize = size
-                }
+            if valuesArray.count > 4 {
+                maxSize = sizeValue(valuesArray[4])
             }
         }
 
-        let resizable = hasGrowArea || hasZoomButton || (subroleValue == (kAXStandardWindowSubrole as String))
-
-        if !resizable {
-            if let size = currentSize {
-                return .fixed(size: size)
-            }
-            if let frame = try? frame(window) {
-                return .fixed(size: frame.size)
-            }
-            return .unconstrained
-        }
-
-        return WindowSizeConstraints(
-            minSize: minSize,
-            maxSize: maxSize,
-            isFixed: false
+        return resolvedSizeConstraints(
+            AXWindowConstraintInputs(
+                hasGrowArea: hasGrowArea,
+                hasZoomButton: hasZoomButton,
+                subrole: subroleValue,
+                minSize: minSize,
+                maxSize: maxSize,
+                currentSize: currentSize ?? (try? frame(window).size)
+            )
         )
     }
 

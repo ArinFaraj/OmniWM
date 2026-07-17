@@ -13,7 +13,8 @@ final class WindowRuleEngineTests: XCTestCase {
         bundleId: String?,
         title: String? = nil,
         role: String? = kAXWindowRole as String,
-        subrole: String? = kAXStandardWindowSubrole as String
+        subrole: String? = kAXStandardWindowSubrole as String,
+        attributeFetchSucceeded: Bool = true
     ) -> WindowRuleFacts {
         WindowRuleFacts(
             appName: appName,
@@ -28,7 +29,7 @@ final class WindowRuleEngineTests: XCTestCase {
                 hasMinimizeButton: true,
                 appPolicy: .regular,
                 bundleId: bundleId,
-                attributeFetchSucceeded: true
+                attributeFetchSucceeded: attributeFetchSucceeded
             ),
             sizeConstraints: nil,
             windowServer: nil
@@ -129,6 +130,35 @@ final class WindowRuleEngineTests: XCTestCase {
         XCTAssertEqual(decision.source, .userRule(bundled.id))
     }
 
+    func testSteamBuiltInDefersWhenAXFactsFailed() {
+        let engine = WindowRuleEngine()
+        let decision = evaluate(
+            engine,
+            facts(
+                appName: "Steam",
+                bundleId: "com.valvesoftware.steam",
+                role: nil,
+                subrole: nil,
+                attributeFetchSucceeded: false
+            )
+        )
+
+        XCTAssertEqual(decision.disposition, .undecided)
+        XCTAssertEqual(decision.deferredReason, .attributeFetchFailed)
+        XCTAssertEqual(decision.admissionOutcome, .deferred)
+    }
+
+    func testSteamBuiltInTilesWhenAXFactsAreValid() {
+        let engine = WindowRuleEngine()
+        let decision = evaluate(
+            engine,
+            facts(appName: "Steam", bundleId: "com.valvesoftware.steam")
+        )
+
+        XCTAssertEqual(decision.disposition, .managed)
+        XCTAssertEqual(decision.source, .builtInRule("steamClient"))
+    }
+
     func testMoreSpecificRuleWithoutInitialWidthShadowsGenericWidthRule() {
         let engine = WindowRuleEngine()
         let generic = AppRule(bundleId: "com.test.app", initialColumnWidth: 0.5)
@@ -171,6 +201,32 @@ final class WindowRuleEngineTests: XCTestCase {
         let decision = evaluate(engine, facts(appName: "VMD", bundleId: nil, title: "VMD Main"))
         XCTAssertEqual(decision.disposition, .floating)
         XCTAssertEqual(decision.source, .userRule(rule.id))
+    }
+
+    func testUnscopedTitleRuleFetchesTitleForBundledApp() {
+        let engine = WindowRuleEngine()
+        let rule = AppRule(bundleId: "", titleSubstring: "Main", layout: .float)
+        engine.rebuild(rules: [rule])
+
+        XCTAssertTrue(engine.requiresTitle(for: "example.app"))
+    }
+
+    func testAppNameScopedTitleRuleFetchesOnlyForMatchingApp() {
+        let engine = WindowRuleEngine()
+        let rule = AppRule(
+            bundleId: "",
+            appNameSubstring: "VMD",
+            titleSubstring: "Main",
+            layout: .float
+        )
+        engine.rebuild(rules: [rule])
+
+        XCTAssertTrue(engine.requiresTitle(for: "example.app", appName: "VMD Viewer"))
+        XCTAssertFalse(engine.requiresTitle(for: "example.app", appName: "Other App"))
+        XCTAssertNotEqual(
+            evaluate(engine, facts(appName: "Other App", bundleId: "example.app")).disposition,
+            .undecided
+        )
     }
 
     func testProjectionSnapshotValidWhenAnchoredOnAppName() {

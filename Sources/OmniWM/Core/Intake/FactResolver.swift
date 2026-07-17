@@ -14,8 +14,28 @@ struct ActivationFacts: Sendable {
     let pid: pid_t
     let source: ActivationEventSource
     let origin: ActivationCallOrigin
+    let observationGeneration: UInt64
     let requestedAtSeq: UInt64
     let focusedWindow: FocusedWindowFact?
+    let callbackGeneration: UInt64?
+
+    init(
+        pid: pid_t,
+        source: ActivationEventSource,
+        origin: ActivationCallOrigin,
+        observationGeneration: UInt64,
+        requestedAtSeq: UInt64,
+        focusedWindow: FocusedWindowFact?,
+        callbackGeneration: UInt64? = nil
+    ) {
+        self.pid = pid
+        self.source = source
+        self.origin = origin
+        self.observationGeneration = observationGeneration
+        self.requestedAtSeq = requestedAtSeq
+        self.focusedWindow = focusedWindow
+        self.callbackGeneration = callbackGeneration
+    }
 }
 
 struct WindowConstraintsFact: Sendable {
@@ -25,53 +45,84 @@ struct WindowConstraintsFact: Sendable {
 
 @MainActor
 final class FactResolver {
+    private struct ActivationFactRequest {
+        let pid: pid_t
+        let source: ActivationEventSource
+        let origin: ActivationCallOrigin
+        let observationGeneration: UInt64
+        let requestedAtSeq: UInt64
+        let callbackGeneration: UInt64?
+    }
+
     var factProvider: ((pid_t) -> FocusedWindowFact?)?
 
     private var resolverThread: Thread?
     private var inFlightActivationPids: Set<pid_t> = []
+    private var pendingActivationRequestsByPid: [pid_t: ActivationFactRequest] = [:]
     private var inFlightConstraintTokens: Set<WindowToken> = []
 
     func resolveActivationFacts(
         pid: pid_t,
         source: ActivationEventSource,
-        origin: ActivationCallOrigin
+        origin: ActivationCallOrigin,
+        observationGeneration: UInt64,
+        callbackGeneration: UInt64? = nil
     ) {
-        if !source.isAuthoritative, inFlightActivationPids.contains(pid) {
-            return
-        }
-        let requestedAtSeq = EventIntake.currentSeq()
+        let request = ActivationFactRequest(
+            pid: pid,
+            source: source,
+            origin: origin,
+            observationGeneration: observationGeneration,
+            requestedAtSeq: EventIntake.currentSeq(),
+            callbackGeneration: callbackGeneration
+        )
+        resolveActivationFacts(request)
+    }
+
+    private func resolveActivationFacts(_ request: ActivationFactRequest) {
         if let factProvider {
             EventIntake.post(
                 .activationFactsResolved(
                     ActivationFacts(
-                        pid: pid,
-                        source: source,
-                        origin: origin,
-                        requestedAtSeq: requestedAtSeq,
-                        focusedWindow: factProvider(pid)
+                        pid: request.pid,
+                        source: request.source,
+                        origin: request.origin,
+                        observationGeneration: request.observationGeneration,
+                        requestedAtSeq: request.requestedAtSeq,
+                        focusedWindow: factProvider(request.pid),
+                        callbackGeneration: request.callbackGeneration
                     )
                 )
             )
             return
         }
-        inFlightActivationPids.insert(pid)
-        nonisolated(unsafe) let thread = AppAXContext.contexts[pid]?.axThread ?? sharedResolverThread()
+        if inFlightActivationPids.contains(request.pid) {
+            pendingActivationRequestsByPid[request.pid] = request
+            return
+        }
+        inFlightActivationPids.insert(request.pid)
+        nonisolated(unsafe) let thread = AppAXContext.contexts[request.pid]?.axThread ?? sharedResolverThread()
         Task { @MainActor in
             let focusedWindow = (try? await thread.runInLoop { _ in
-                Self.readFocusedWindowFact(pid: pid)
+                Self.readFocusedWindowFact(pid: request.pid)
             }) ?? nil
-            inFlightActivationPids.remove(pid)
+            inFlightActivationPids.remove(request.pid)
             EventIntake.post(
                 .activationFactsResolved(
                     ActivationFacts(
-                        pid: pid,
-                        source: source,
-                        origin: origin,
-                        requestedAtSeq: requestedAtSeq,
-                        focusedWindow: focusedWindow
+                        pid: request.pid,
+                        source: request.source,
+                        origin: request.origin,
+                        observationGeneration: request.observationGeneration,
+                        requestedAtSeq: request.requestedAtSeq,
+                        focusedWindow: focusedWindow,
+                        callbackGeneration: request.callbackGeneration
                     )
                 )
             )
+            if let pendingRequest = pendingActivationRequestsByPid.removeValue(forKey: request.pid) {
+                resolveActivationFacts(pendingRequest)
+            }
         }
     }
 
@@ -90,14 +141,8 @@ final class FactResolver {
         }
     }
 
-    func dumpWindowAXTree(axRef: AXWindowRef, pid: pid_t) async -> AXWindowAXTreeDump? {
-        nonisolated(unsafe) let thread = AppAXContext.contexts[pid]?.axThread ?? sharedResolverThread()
-        return try? await thread.runInLoop { _ in
-            AXWindowDump.tree(window: axRef.element, app: AXUIElementCreateApplication(pid))
-        }
-    }
-
     func stop() {
+        pendingActivationRequestsByPid.removeAll()
         guard let thread = resolverThread else { return }
         resolverThread = nil
         thread.runInLoopAsync { _ in
@@ -132,6 +177,13 @@ final class FactResolver {
         guard CFGetTypeID(focusedWindow) == AXUIElementGetTypeID() else { return nil }
         let axElement = unsafeDowncast(focusedWindow, to: AXUIElement.self)
         guard let axRef = try? AXWindowRef(element: axElement) else { return nil }
+        if let elementPid = AXWindowService.processIdentifier(axRef), elementPid != pid {
+            DiagnosticsEventRecorder.shared.recordLifecycle(
+                name: "focusedAX.pidMismatch.expected=\(pid)",
+                pid: elementPid,
+                windowId: UInt32(exactly: axRef.windowId)
+            )
+        }
         let attributes = AXWindowService.roleAndSubrole(axRef)
         return FocusedWindowFact(
             axRef: axRef,

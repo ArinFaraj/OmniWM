@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2026 BarutSRB — https://github.com/BarutSRB/OmniWM
 
+import AppKit
 import SwiftUI
 
 struct ReportIssueSettingsTab: View {
     @State private var model: ReportIssueViewModel
     @State private var showWalkthrough = false
-    @State private var hasRecentTrace = false
-    @State private var traceReloadToken = 0
     @State private var showDiscardConfirm = false
     @State private var traceStatus: DiagnosticsActionStatus = .idle
+    @State private var didApplyCrashPrefill = false
+    @State private var evidenceRefreshGeneration = 0
     @FocusState private var titleFocused: Bool
 
     let controller: WMController
@@ -17,12 +18,15 @@ struct ReportIssueSettingsTab: View {
 
     init(controller: WMController) {
         self.controller = controller
-        crashPrefill = controller.pendingCrashReport
+        let pendingCrashReport = controller.pendingCrashReport
+        crashPrefill = pendingCrashReport
         let settings = controller.settings
         _model = State(initialValue: ReportIssueViewModel(
             defaultLayout: controller.activeWorkspace().map { settings.layoutType(for: $0.name) }
                 ?? settings.defaultLayoutType,
-            makeDiagnosticsBundle: { try controller.writeDiagnosticsBundle() },
+            prepareDiagnosticAttachment: {
+                try await controller.prepareDiagnosticAttachment(evidence: $0)
+            },
             hotkeyContextProvider: { text in
                 IssueHotkeyContext.resolve(text: text, bindings: settings.hotkeyBindings)
             },
@@ -38,14 +42,12 @@ struct ReportIssueSettingsTab: View {
                 submittedSection(outcome)
             default:
                 contentSections
+                    .disabled(model.phase == .submitting)
             }
         }
         .formStyle(.grouped)
         .onAppear(perform: handleAppear)
-        .task(id: traceReloadToken) { await refreshTraceState() }
-        .onChange(of: controller.traceCaptureStatus.lastArtifact) { _, artifact in
-            if artifact != nil { hasRecentTrace = true }
-        }
+        .task(id: controller.traceCaptureStatus.lastArtifact) { await refreshAvailableEvidence() }
     }
 
     @ViewBuilder
@@ -58,52 +60,6 @@ struct ReportIssueSettingsTab: View {
         contextSection
         rewriteSection
         submitSection
-    }
-
-    @ViewBuilder
-    private var traceSection: some View {
-        Section("Diagnostics recording") {
-            if controller.isTraceCaptureActive {
-                recordingLabel
-                Button("Stop & Save Recording") { stopRecording() }
-                SettingsCaption(
-                    "Stop & Save before submitting — an in-progress recording isn't attached to the bundle."
-                )
-            } else if hasRecentTrace {
-                Label("Trace captured — it'll be attached to your report.", systemImage: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                Button("Record Again") { startRecording() }
-                    .controlSize(.small)
-            } else {
-                Label("No trace recorded yet.", systemImage: "exclamationmark.triangle.fill")
-                    .foregroundStyle(.orange)
-                Button("Record a Trace") { startRecording() }
-                    .buttonStyle(.borderedProminent)
-                SettingsCaption(
-                    "Reproduce the bug while recording, then come back — your draft is saved. "
-                        + "A trace makes bugs far easier to fix, but it's optional."
-                )
-            }
-            statusLabel(traceStatus)
-        }
-    }
-
-    @ViewBuilder
-    private var recordingLabel: some View {
-        if let startedAt = controller.traceCaptureStatus.startedAt {
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                let text = elapsed(since: startedAt, now: context.date)
-                HStack(spacing: 8) {
-                    Image(systemName: "record.circle")
-                        .foregroundStyle(.red)
-                    Text("Recording \(text)")
-                        .font(.callout.monospacedDigit())
-                }
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("Recording in progress")
-                .accessibilityValue(text)
-            }
-        }
     }
 
     @ViewBuilder
@@ -148,8 +104,8 @@ struct ReportIssueSettingsTab: View {
                     .textFieldStyle(.roundedBorder)
             }
             SettingsCaption(
-                "OmniWM version, macOS, your settings, and any trace are captured automatically in the "
-                    + "diagnostics bundle — no need to type them."
+                "OmniWM version, macOS, your settings, and explicitly selected evidence are included "
+                    + "in the diagnostic log — no need to type them."
             )
         }
     }
@@ -205,12 +161,30 @@ struct ReportIssueSettingsTab: View {
     private var submitSection: some View {
         Section {
             SettingsCaption(
-                "A diagnostics .zip (logs, your settings, system info, and any trace) is created automatically "
-                    + "and revealed in Finder. Review it before dragging it into a public issue."
+                "A fresh diagnostic snapshot is always prepared. Explicitly selected crash or trace evidence "
+                    + "is appended to that same .log."
             )
-            Button("Submit to GitHub") { model.submit() }
-                .buttonStyle(.borderedProminent)
-                .disabled(!model.canSubmit)
+            SettingsCaption(
+                "Diagnostic logs may include OmniWM settings, app and window titles, and title-based rule "
+                    + "matchers. Review the .log in Finder before attaching it to a public GitHub issue."
+            )
+            HStack {
+                Button("Submit to GitHub") { Task { await model.submit() } }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(!model.canSubmit || controller.traceCaptureStatus.phase != .idle)
+                if model.phase == .submitting {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Preparing diagnostics…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            if controller.traceCaptureStatus.phase != .idle {
+                SettingsCaption("Stop, Save & Include the recording before submitting so this trace is attached.")
+            }
             if let hint = model.submitRequirementHint {
                 SettingsCaption(hint)
             }
@@ -268,30 +242,35 @@ struct ReportIssueSettingsTab: View {
                 )
                 .foregroundStyle(.secondary)
             }
-            bundleStatus
+            attachmentStatus
             Button("Report another issue") { model.startOver() }
         }
     }
 
     @ViewBuilder
-    private var bundleStatus: some View {
-        if let url = model.lastBundleURL {
+    private var attachmentStatus: some View {
+        if let url = model.lastAttachment {
             Label(
-                "Diagnostics bundle revealed in Finder — drag \(url.lastPathComponent) into the issue to attach it.",
+                "Diagnostic log revealed in Finder — drag \(url.lastPathComponent) into the issue to attach it.",
                 systemImage: "paperclip"
             )
             .font(.caption)
             .foregroundStyle(.secondary)
-            Button("Reveal Bundle Again") { model.revealLastBundle() }
+            Button("Reveal Log Again") { model.revealLastAttachment() }
                 .controlSize(.small)
         }
-        if let bundleError = model.lastBundleError {
+        if let attachmentError = model.lastAttachmentError {
             Label(
-                "Couldn't create the diagnostics bundle: \(bundleError). Your issue still opened.",
+                "Couldn't prepare the diagnostic log: \(attachmentError). Your issue still opened.",
                 systemImage: "exclamationmark.triangle.fill"
             )
             .font(.caption)
             .foregroundStyle(.orange)
+        }
+        if let attachmentWarning = model.lastAttachmentWarning {
+            Label(attachmentWarning, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.orange)
         }
     }
 
@@ -309,20 +288,143 @@ struct ReportIssueSettingsTab: View {
 }
 
 extension ReportIssueSettingsTab {
-    private func handleAppear() {
-        applyCrashPrefillIfNeeded()
-        if !controller.settings.hasSeenIssueWalkthrough {
-            showWalkthrough = true
+    @ViewBuilder
+    private var traceSection: some View {
+        Section("Diagnostics recording") {
+            switch controller.traceCaptureStatus.phase {
+            case .recording:
+                recordingLabel
+                Button("Stop, Save & Include Recording") { stopRecording() }
+                SettingsCaption(
+                    "Stop, save, and include before submitting — an in-progress recording isn't ready to attach."
+                )
+            case .finalizing:
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Finalizing diagnostics…")
+                }
+            case .idle:
+                Label("Fresh diagnostic snapshot (always included)", systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                evidencePicker
+                if let selected = model.selectedEvidence,
+                   !model.availableEvidence.contains(selected)
+                {
+                    SettingsCaption(
+                        "The selected file is no longer available. Submission will continue with the fresh "
+                            + "snapshot unless you select different evidence."
+                    )
+                }
+                Button(recordButtonTitle) { startRecording() }
+                    .buttonStyle(.borderedProminent)
+                SettingsCaption(
+                    "Reproduce the bug while recording, then come back — your draft is saved. "
+                        + "Crash and trace evidence is included only when you explicitly select it."
+                )
+            }
+            statusLabel(traceStatus)
         }
+    }
+
+    @ViewBuilder
+    private var evidencePicker: some View {
+        Picker("Additional evidence", selection: evidenceSelection) {
+            Text("No additional evidence")
+                .tag(IssueDiagnosticEvidence?.none)
+            ForEach(model.availableEvidence, id: \.self) { evidence in
+                Text(evidenceLabel(evidence))
+                    .tag(Optional(evidence))
+            }
+            if let selected = model.selectedEvidence,
+               !model.availableEvidence.contains(selected)
+            {
+                Text("Unavailable: \(selected.url.lastPathComponent)")
+                    .tag(Optional(selected))
+            }
+        }
+        .pickerStyle(.radioGroup)
+    }
+
+    private var evidenceSelection: Binding<IssueDiagnosticEvidence?> {
+        Binding {
+            model.selectedEvidence
+        } set: { evidence in
+            if let evidence {
+                model.selectEvidence(evidence)
+            } else {
+                model.useFreshSnapshot()
+            }
+        }
+    }
+
+    private func evidenceLabel(_ evidence: IssueDiagnosticEvidence) -> String {
+        switch evidence {
+        case let .crash(url):
+            "Crash: \(url.lastPathComponent)"
+        case let .trace(url):
+            "Saved trace: \(url.lastPathComponent)"
+        }
+    }
+
+    private var recordButtonTitle: String {
+        switch model.selectedEvidence {
+        case .some(.crash):
+            "Record a Trace"
+        case .some(.trace):
+            "Record Again"
+        case nil:
+            model.availableEvidence.contains { evidence in
+                if case .trace = evidence { return true }
+                return false
+            } ? "Record Again" : "Record a Trace"
+        }
+    }
+
+    @ViewBuilder
+    private var recordingLabel: some View {
+        if let startedAt = controller.traceCaptureStatus.startedAt {
+            TimelineView(.periodic(from: .now, by: 1)) { context in
+                let text = elapsed(since: startedAt, now: context.date)
+                HStack(spacing: 8) {
+                    Image(systemName: "record.circle")
+                        .foregroundStyle(.red)
+                    Text("Recording \(text)")
+                        .font(.callout.monospacedDigit())
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Recording in progress")
+                .accessibilityValue(text)
+            }
+        }
+    }
+
+    private func handleAppear() {
+        showWalkthrough = showWalkthrough || !controller.settings.hasSeenIssueWalkthrough
         titleFocused = model.title.isEmpty
     }
 
     private func applyCrashPrefillIfNeeded() {
-        guard let crashPrefill, !model.hasDraftContent else { return }
-        model.title = "Crash: \(crashPrefill.reason)"
-        model.category = .crash
-        model.actual = "OmniWM recovered from a crash (log: \(crashPrefill.url.lastPathComponent)).\n\n"
-            + "Reason: \(crashPrefill.reason)"
+        guard !didApplyCrashPrefill else { return }
+        didApplyCrashPrefill = true
+        guard let crashPrefill else { return }
+        model.applyFreshCrashPrefill(crashPrefill)
+    }
+
+    private func refreshAvailableEvidence() async {
+        evidenceRefreshGeneration &+= 1
+        let generation = evidenceRefreshGeneration
+        let directory = controller.diagnosticsDirectory
+        let pendingCrashURL = controller.pendingCrashReport?.url
+        let evidence = await Task.detached(priority: .utility) {
+            DiagnosticsFileScanner.issueEvidence(
+                in: directory,
+                pendingCrashURL: pendingCrashURL
+            )
+        }.value
+        guard !Task.isCancelled, generation == evidenceRefreshGeneration else { return }
+        model.updateAvailableEvidence(evidence)
+        applyCrashPrefillIfNeeded()
     }
 
     private func dismissWalkthrough() {
@@ -331,29 +433,37 @@ extension ReportIssueSettingsTab {
     }
 
     private func startRecording() {
-        switch controller.toggleTraceCaptureForUI(desiredState: .active) {
-        case .started:
-            traceStatus = .success("Recording started")
-        case .noChange:
-            traceStatus = .failure("A recording is already running")
-        case .stopped,
-             .writeFailed:
-            traceStatus = .failure("Unexpected recording state")
+        Task {
+            switch await controller.toggleTraceCaptureForUI(desiredState: .active) {
+            case .started:
+                model.recordingStarted()
+                await refreshAvailableEvidence()
+                traceStatus = .success("Recording started")
+            case .noChange:
+                traceStatus = .failure("A recording is already running")
+            case .stopped,
+                 .writeFailed:
+                traceStatus = .failure("Unexpected recording state")
+            }
         }
     }
 
     private func stopRecording() {
-        switch controller.toggleTraceCaptureForUI(desiredState: .inactive) {
-        case .stopped:
-            traceStatus = .idle
-        case let .writeFailed(reason):
-            traceStatus = .failure("Failed to write the recording: \(reason)")
-        case .noChange:
-            traceStatus = .failure("No recording is running")
-        case .started:
-            traceStatus = .failure("Unexpected recording state")
+        Task {
+            switch await controller.toggleTraceCaptureForUI(desiredState: .inactive) {
+            case let .stopped(artifact):
+                traceStatus = .idle
+                model.recordingFinished(traceURL: artifact.url)
+                await refreshAvailableEvidence()
+                NSWorkspace.shared.activateFileViewerSelecting([artifact.url])
+            case let .writeFailed(reason):
+                traceStatus = .failure("Failed to write the recording: \(reason)")
+            case .noChange:
+                traceStatus = .failure("No recording is running")
+            case .started:
+                traceStatus = .failure("Unexpected recording state")
+            }
         }
-        traceReloadToken += 1
     }
 
     @ViewBuilder
@@ -369,14 +479,6 @@ extension ReportIssueSettingsTab {
             Label(message, systemImage: "exclamationmark.triangle.fill")
                 .font(.caption)
                 .foregroundStyle(.red)
-        }
-    }
-
-    private func refreshTraceState() async {
-        let directory = controller.diagnosticsDirectory
-        let files = await Task.detached { DiagnosticsFileScanner.scan(directory) }.value
-        hasRecentTrace = files.contains {
-            $0.name.hasPrefix("omniwm-trace-") && !$0.name.hasSuffix(".partial.log")
         }
     }
 
