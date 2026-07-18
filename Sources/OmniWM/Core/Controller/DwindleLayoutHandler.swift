@@ -1091,9 +1091,11 @@ import QuartzCore
         // tile - it can never strand or leave a sliver. The outgoing workspace uses the
         // standard instant park (no custom SkyLight move), which is what caused the earlier
         // sliver, so it is deliberately not animated here.
+        var didSeedIncomingSlide = false
         if snapshot.isActiveWorkspace,
            let slide = controller?.layoutRefreshController.takeIncomingSlide(for: snapshot.workspaceId)
         {
+            didSeedIncomingSlide = true
             for (token, frame) in newFrames {
                 let seeded = frame.offsetBy(dx: slide.dx, dy: 0)
                 oldFrames[token] = seeded
@@ -1110,16 +1112,29 @@ import QuartzCore
 
         let rememberedFocusToken = engine.activeToken(in: snapshot.workspaceId)
 
-        engine.animateWindowMovements(
-            oldFrames: oldFrames,
-            previousTargetFrames: previousTargetFrames,
-            newFrames: newFrames,
-            in: snapshot.workspaceId,
-            startTime: now,
-            motion: controller?.motionPolicy.snapshot() ?? .enabled
-        )
+        // Only the workspace currently visible on its monitor animates. During a follow-move
+        // BOTH the source and target workspaces relayout in one pass, but there is a single
+        // animation slot per display (dwindleAnimationByDisplay keyed by displayId). If the
+        // inactive workspace also animates, its .startDwindleAnimation registration overwrites
+        // the active one's, and its own animation is then guard-stopped on the next tick
+        // (slot-workspace != active-workspace) and abandoned - stranding a window at its seed
+        // (proven in logs: a moved window frozen at its 0.85 pop-in frame). Hidden workspaces
+        // get their windows placed straight on the final tiles by the static diff below.
+        // Mirrors the isActiveWorkspace gate on the incoming-slide seed above.
+        if snapshot.isActiveWorkspace {
+            engine.animateWindowMovements(
+                oldFrames: oldFrames,
+                previousTargetFrames: previousTargetFrames,
+                newFrames: newFrames,
+                in: snapshot.workspaceId,
+                startTime: now,
+                motion: controller?.motionPolicy.snapshot() ?? .enabled,
+                popInAllowed: controller?.displayActiveAndUnlocked == true
+            )
+        }
 
-        let animationsActive = engine.hasActiveAnimations(in: snapshot.workspaceId, at: now)
+        let animationsActive = snapshot.isActiveWorkspace
+            && engine.hasActiveAnimations(in: snapshot.workspaceId, at: now)
         let diffFrames = animationsActive
             ? engine.calculateAnimatedFrames(
                 baseFrames: newFrames,
@@ -1133,7 +1148,13 @@ import QuartzCore
             engine: engine,
             workspaceId: snapshot.workspaceId,
             preferredHideSide: snapshot.preferredHideSide,
+            // Suppress the tile-restore while a slide is seeded this pass. Restoring reveals
+            // the window straight at its final tile, which flashes for a frame before the
+            // seeded slide animation carries it in from off-screen. didSeedIncomingSlide is
+            // the correct signal here: hasIncomingSlide checks slideAnimationsByDisplay, an
+            // unrelated mechanism that is always empty for the dwindle seeded slide.
             canRestoreHiddenWorkspaceWindows: snapshot.isActiveWorkspace
+                && !didSeedIncomingSlide
                 && !(controller?.layoutRefreshController.hasIncomingSlide(for: snapshot.workspaceId) ?? false),
             scale: snapshot.monitor.scale,
             reassertHidden: true,

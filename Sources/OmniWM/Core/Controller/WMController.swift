@@ -91,6 +91,16 @@ final class WMController {
         }
     }
 
+    /// True only when the display is awake AND the screen is unlocked - i.e. when a
+    /// per-frame window animation can actually tick to completion. Strand-prone animations
+    /// (pop-in, workspace slide, which start a window off its tile) must be gated on this:
+    /// if the display is asleep/locked, the CADisplayLink is paused and an in-flight
+    /// animation never finishes, leaving the window stranded at its seed frame. When this
+    /// is false, callers place the window directly at its tile with no animation.
+    var displayActiveAndUnlocked: Bool {
+        !isLockScreenActive && CGDisplayIsActive(CGMainDisplayID()) != 0
+    }
+
     let axManager = AXManager()
     let traceCaptureCoordinator: RuntimeTraceCaptureCoordinator
     let appInfoCache = AppInfoCache()

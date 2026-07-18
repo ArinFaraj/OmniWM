@@ -554,7 +554,7 @@ final class WorkspaceNavigationHandler {
     // Incoming-slide only: the target workspace's windows slide in via the safe seeded
     // frame animation (always land on their tiles). The outgoing workspace uses the
     // standard instant park (the custom SkyLight slide-out that caused the sliver is gone).
-    private static let workspaceSlideEnabled = false
+    private static let workspaceSlideEnabled = true
 
     private func beginWorkspaceSlideIfNeeded(
         from previousWorkspace: WorkspaceDescriptor?,
@@ -563,6 +563,9 @@ final class WorkspaceNavigationHandler {
     ) {
         guard Self.workspaceSlideEnabled else { return }
         guard let controller, let monitor, let previousWorkspace,
+              // No slide while the display is asleep/locked - the seeded slide-in animation
+              // would never tick to completion and could strand windows off their tiles.
+              controller.displayActiveAndUnlocked,
               previousWorkspace.id != targetWorkspace.id,
               let previousNumber = Int(previousWorkspace.name),
               let targetNumber = Int(targetWorkspace.name),

@@ -32,6 +32,21 @@ final class LockScreenObserver {
     func start() {
         setupObservers()
         frontmostIsLockScreen = frontmostApplicationProvider()?.bundleIdentifier == Self.lockScreenAppBundleId
+        // If we launch (or restart) while the screen is already locked, the lock
+        // notification fired before we were listening, so seed the state from the session
+        // directly - otherwise animations would think the display is live and could strand.
+        if frontmostIsLockScreen || Self.sessionScreenIsLocked() {
+            state = .locked
+            frontmostIsLockScreen = true
+            onLockDetected?()
+        }
+    }
+
+    private static func sessionScreenIsLocked() -> Bool {
+        guard let dict = CGSessionCopyCurrentDictionary() as? [String: Any] else { return false }
+        if let locked = dict["CGSSessionScreenIsLocked"] as? Bool { return locked }
+        if let locked = dict["CGSSessionScreenIsLocked"] as? Int { return locked != 0 }
+        return false
     }
 
     func stop() {

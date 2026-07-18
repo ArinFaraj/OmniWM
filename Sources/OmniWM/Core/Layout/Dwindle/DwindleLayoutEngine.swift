@@ -70,7 +70,7 @@ final class DwindleLayoutEngine {
 
     // Grow-in pop-in for a single newly-opened window (Hyprland windowsIn). Safe: reuses
     // the frame-animation path and always lands at the real tile frame.
-    static let windowPopInEnabled = false
+    static let windowPopInEnabled = true
 
     func root(for workspaceId: WorkspaceDescriptor.ID) -> DwindleNode? {
         states[workspaceId]?.root
@@ -1761,18 +1761,19 @@ final class DwindleLayoutEngine {
         newFrames: [WindowToken: CGRect],
         in workspaceId: WorkspaceDescriptor.ID,
         startTime: TimeInterval,
-        motion: MotionSnapshot
+        motion: MotionSnapshot,
+        popInAllowed: Bool = true
     ) {
         guard let state = states[workspaceId] else { return }
 
         // Brand-new windows have no prior frame, so historically they appeared instantly.
-        // A single newly-opened window now grows into its tile from a smaller centered
-        // frame (Hyprland-style pop-in) using the same proven frame-animation path. It
-        // always ends at newFrame regardless of the animation, so it can never strand.
-        // Bulk appearances (workspace bootstrap / first show) skip the pop-in to avoid
-        // every window popping at once.
+        // A single newly-opened window grows into its tile from a smaller centered frame
+        // (Hyprland-style pop-in) via the frame-animation path. `popInAllowed` is false when
+        // the display is asleep/locked so the seed animation can't strand there (it would
+        // never tick to completion); the window is then placed directly at its tile.
+        // Bulk appearances (workspace bootstrap / first show) skip the pop-in too.
         let newTokens = newFrames.keys.filter { oldFrames[$0] == nil }
-        let popIn = Self.windowPopInEnabled && motion.animationsEnabled && newTokens.count == 1
+        let popIn = Self.windowPopInEnabled && motion.animationsEnabled && popInAllowed && newTokens.count == 1
 
         for (handle, newFrame) in newFrames {
             guard let node = state.leafByToken[handle] else { continue }
