@@ -18,10 +18,15 @@ final class RuntimeArchitectureTests: XCTestCase {
 
         XCTAssertEqual(animation.value(at: startTime), 0.0, accuracy: 0.000001)
         XCTAssertEqual(animation.value(at: startTime + config.duration), 1.0, accuracy: 0.000001)
-        XCTAssertTrue(animation.isComplete(at: startTime + config.duration))
+        // startTime + duration can land one float ulp short of duration (4.35 - 4.0 is
+        // 0.34999999999999964), so probe just past the boundary instead of exactly on it.
+        XCTAssertTrue(animation.isComplete(at: startTime + config.duration + 0.000001))
     }
 
-    func testHyprlandDwindleBezierIsMonotonicAndSnappy() {
+    // The window curve approximates an underdamped spring: it rises fast, overshoots its
+    // target by a few percent, then settles back to exactly 1. It is deliberately NOT
+    // monotonic - that overshoot is the "spring" you see when a window arrives.
+    func testHyprlandDwindleBezierOvershootsSlightlyThenSettles() {
         let config = CubicConfig.hyprlandDwindle
         let startTime = 9.0
         let animation = CubicAnimation(
@@ -31,17 +36,25 @@ final class RuntimeArchitectureTests: XCTestCase {
             config: config
         )
         var previous = -Double.infinity
+        var peak = 0.0
+        var reachedPeak = false
 
         for step in 0 ... 40 {
             let time = startTime + config.duration * Double(step) / 40.0
             let value = animation.value(at: time)
-            XCTAssertGreaterThanOrEqual(value + 0.000001, previous)
+            if value + 0.000001 < previous { reachedPeak = true }
+            // Rises monotonically up to the overshoot peak, then eases back down to 1.
+            if !reachedPeak { XCTAssertGreaterThanOrEqual(value + 0.000001, previous) }
+            peak = max(peak, value)
             previous = value
         }
 
+        XCTAssertGreaterThan(peak, 1.0, "the spring curve should overshoot past its target")
+        XCTAssertLessThan(peak, 1.05, "overshoot should stay a few percent, not a visible bounce")
+        XCTAssertEqual(animation.value(at: startTime + config.duration), 1.0, accuracy: 0.000001)
+
         let quarterValue = animation.value(at: startTime + config.duration * 0.25)
         XCTAssertGreaterThan(quarterValue, 0.65)
-        XCTAssertLessThan(quarterValue, 1.0)
     }
 
     func testDwindleRectAnimationRetargetsFromPresentedFrame() throws {
