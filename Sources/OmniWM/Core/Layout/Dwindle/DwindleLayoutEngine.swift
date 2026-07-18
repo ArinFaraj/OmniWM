@@ -70,7 +70,7 @@ final class DwindleLayoutEngine {
 
     // Grow-in pop-in for a single newly-opened window (Hyprland windowsIn). Safe: reuses
     // the frame-animation path and always lands at the real tile frame.
-    static let windowPopInEnabled = true
+    static let windowPopInEnabled = false
 
     func root(for workspaceId: WorkspaceDescriptor.ID) -> DwindleNode? {
         states[workspaceId]?.root
