@@ -83,7 +83,7 @@ private struct Stop {
 
 extension DwindleBuildChoreography {
     static var dwindleTiming: CAMediaTimingFunction {
-        let curve = CubicConfig.hyprlandDwindle
+        let curve = CubicConfig.hyprlandWindowMove
         return CAMediaTimingFunction(
             controlPoints: Float(curve.controlPoint1.x),
             Float(curve.controlPoint1.y),

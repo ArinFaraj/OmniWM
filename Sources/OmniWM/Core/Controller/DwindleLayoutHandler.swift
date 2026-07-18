@@ -1129,7 +1129,9 @@ import QuartzCore
                 in: snapshot.workspaceId,
                 startTime: now,
                 motion: controller?.motionPolicy.snapshot() ?? .enabled,
-                popInAllowed: controller?.displayActiveAndUnlocked == true
+                popInAllowed: controller?.displayActiveAndUnlocked == true,
+                // A workspace switch uses Hyprland's faster `workspaces` slide curve.
+                moveConfigOverride: didSeedIncomingSlide ? .hyprlandWorkspaceSlide : nil
             )
         }
 
