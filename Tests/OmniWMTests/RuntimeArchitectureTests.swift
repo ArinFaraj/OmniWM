@@ -3750,6 +3750,91 @@ final class RuntimeArchitectureTests: XCTestCase {
         }
     }
 
+    // Regression: a follow-move relayouts both the source and target workspace in one pass,
+    // but there is a single animation slot per display (dwindleAnimationByDisplay keyed by
+    // displayId). A workspace that is NOT the one visible on its monitor must not animate -
+    // otherwise its .startDwindleAnimation registration overwrites/guard-stops the visible
+    // workspace's animation and a window strands at its seed frame. This pins the
+    // isActiveWorkspace gate in buildRelayoutPlan: remove it and this test fails.
+    @MainActor
+    func testHiddenWorkspaceDoesNotContendForTheDisplayAnimationSlot() throws {
+        let settings = Self.settingsStore()
+        settings.workspaceConfigurations = settings.workspaceConfigurations.map {
+            ($0.name == "1" || $0.name == "2") ? $0.with(layoutType: .dwindle) : $0
+        }
+        let controller = WMController(
+            settings: settings,
+            windowFocusOperations: WindowFocusOperations(
+                activateApp: { _ in },
+                focusSpecificWindow: { _, _, _ in },
+                raiseWindow: { _ in }
+            )
+        )
+        let monitor = Monitor(
+            id: .init(displayId: 20_001),
+            displayId: 20_001,
+            frame: CGRect(x: 0, y: 0, width: 1200, height: 800),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1200, height: 800),
+            hasNotch: false,
+            name: "Main"
+        )
+        controller.workspaceManager.applyMonitorConfigurationChange([monitor])
+
+        let engine = DwindleLayoutEngine()
+        engine.animationClock = controller.animationClock
+        controller.dwindleEngine = engine
+
+        let activeWs = try XCTUnwrap(controller.workspaceManager.workspaceId(for: "1", createIfMissing: true))
+        let hiddenWs = try XCTUnwrap(controller.workspaceManager.workspaceId(for: "2", createIfMissing: true))
+        _ = controller.workspaceManager.focusWorkspace(named: "1")
+        XCTAssertEqual(controller.activeWorkspace()?.id, activeWs)
+
+        let activeToken = controller.workspaceManager.addWindow(
+            AXWindowRef(element: AXUIElementCreateApplication(700_001), windowId: 700_101),
+            pid: 700_001,
+            windowId: 700_101,
+            to: activeWs
+        )
+        _ = engine.addWindow(token: activeToken, to: activeWs, activeWindowFrame: nil)
+        let hiddenToken = controller.workspaceManager.addWindow(
+            AXWindowRef(element: AXUIElementCreateApplication(700_002), windowId: 700_102),
+            pid: 700_002,
+            windowId: 700_102,
+            to: hiddenWs
+        )
+        _ = engine.addWindow(token: hiddenToken, to: hiddenWs, activeWindowFrame: nil)
+
+        // Put an in-flight frame animation on the HIDDEN workspace's window, seeded 200px off
+        // its tile, so hasActiveAnimations is true when the batched build runs.
+        let now = controller.animationClock.now()
+        let hiddenTile = try XCTUnwrap(engine.calculateLayout(for: hiddenWs, screen: monitor.visibleFrame)[hiddenToken])
+        engine.animateWindowMovements(
+            oldFrames: [hiddenToken: hiddenTile.offsetBy(dx: 200, dy: 0)],
+            previousTargetFrames: [:],
+            newFrames: [hiddenToken: hiddenTile],
+            in: hiddenWs,
+            startTime: now,
+            motion: .enabled
+        )
+        XCTAssertTrue(engine.hasActiveAnimations(in: hiddenWs, at: now))
+
+        let plans = controller.workspaceManager.withBatchedLayoutBuild {
+            controller.dwindleLayoutHandler.layoutWithDwindleEngine(activeWorkspaces: [activeWs, hiddenWs])
+        }
+        let hiddenPlan = try XCTUnwrap(plans.first { $0.workspaceId == hiddenWs })
+
+        // The hidden workspace must emit no animation directive (no slot contention)...
+        XCTAssertTrue(
+            hiddenPlan.animationDirectives.isEmpty,
+            "a hidden workspace must not register a dwindle animation"
+        )
+        // ...and its window must be placed on its final tile, not the 200px-off animated seed.
+        let hiddenFrame = try XCTUnwrap(
+            hiddenPlan.diff.frameChanges.first { $0.token == hiddenToken }?.frame
+        )
+        XCTAssertEqual(hiddenFrame.minX, hiddenTile.minX, accuracy: 1)
+    }
+
     @MainActor
     func testInvariantChecksDistinguishesConsistentAndDivergentLayouts() {
         let ws1: WorkspaceDescriptor.ID = UUID()
