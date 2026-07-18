@@ -66,12 +66,7 @@ final class DwindleLayoutEngine {
         return effective
     }
 
-    // Hyprland `windows` curve/speed for tile moves and resizes.
-    var windowMovementAnimationConfig: CubicConfig = .hyprlandWindowMove
-    // Hyprland `windowsIn` curve/speed for the grow-in of a newly-opened window.
-    var popInAnimationConfig: CubicConfig = .hyprlandWindowIn
-    // Hyprland `windowsIn` grows from popin 87%.
-    static let popInScale: CGFloat = 0.87
+    var windowMovementAnimationConfig: CubicConfig = .hyprlandDwindle
 
     // Grow-in pop-in for a single newly-opened window (Hyprland windowsIn). Safe: reuses
     // the frame-animation path and always lands at the real tile frame.
@@ -1767,13 +1762,9 @@ final class DwindleLayoutEngine {
         in workspaceId: WorkspaceDescriptor.ID,
         startTime: TimeInterval,
         motion: MotionSnapshot,
-        popInAllowed: Bool = true,
-        // Set for a workspace-slide relayout so the seeded windows use Hyprland's faster
-        // `workspaces` curve instead of the slower `windows` move curve.
-        moveConfigOverride: CubicConfig? = nil
+        popInAllowed: Bool = true
     ) {
         guard let state = states[workspaceId] else { return }
-        let moveConfig = moveConfigOverride ?? windowMovementAnimationConfig
 
         // Brand-new windows have no prior frame, so historically they appeared instantly.
         // A single newly-opened window grows into its tile from a smaller centered frame
@@ -1796,17 +1787,17 @@ final class DwindleLayoutEngine {
                         oldFrame: oldFrame,
                         newFrame: newFrame,
                         startTime: startTime,
-                        config: moveConfig,
+                        config: windowMovementAnimationConfig,
                         animated: motion.animationsEnabled
                     )
                 }
             } else if popIn, newTokens.contains(handle) {
-                let popStart = WindowAnimationGeometry.popInStartFrame(tile: newFrame, scale: Self.popInScale)
+                let popStart = WindowAnimationGeometry.popInStartFrame(tile: newFrame, scale: 0.85)
                 node.animateFrom(
                     oldFrame: popStart,
                     newFrame: newFrame,
                     startTime: startTime,
-                    config: popInAnimationConfig,
+                    config: windowMovementAnimationConfig,
                     animated: true
                 )
             }

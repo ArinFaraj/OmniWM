@@ -523,9 +523,7 @@ import QuartzCore
         // slightly as it goes. Reduce Motion shrinks the effect. The window is being
         // destroyed regardless, so if an app refuses to shrink the animation just stops
         // early - it can never leave a live window mis-sized.
-        // Hyprland windowsOut is "popin 87%": shrink toward center to 87%. (It also fades,
-        // which we cannot do on a foreign AX window, so the shrink carries the effect.)
-        let closeScale: CGFloat = 1.0 - 0.13 * reduceMotionScale
+        let closeScale: CGFloat = 1.0 - 0.18 * reduceMotionScale
         let liftOffset = 10.0 * reduceMotionScale
         let toFrame = WindowAnimationGeometry.popOutFrame(
             from: frame,

@@ -26,29 +26,12 @@ struct CubicConfig {
     }
 
     static let `default` = CubicConfig()
-
-    // Hyprland default animation curves and speeds, taken verbatim from Hyprland's shipped
-    // defaults (example/hyprland.lua). Speeds are Hyprland's "ds" unit, 1 ds = 100 ms.
-    //
-    // Hyprland's `windows` (4.79 ds) and `windowsIn` (4.1 ds, popin 87%) animate with its
-    // "easy" spring (mass 1, stiffness 71.2633, damping 15.8273 -> damping ratio ~0.94, i.e.
-    // near-critically damped with ~0% overshoot). easeOutQuint (0.23,1,0.32,1) reproduces that
-    // snappy-decelerate feel on the cubic path, so window moves and the grow-in use it.
-    static let hyprlandWindowMove = CubicConfig(
-        duration: 0.479,
-        controlPoint1: CGPoint(x: 0.23, y: 1.0),
-        controlPoint2: CGPoint(x: 0.32, y: 1.0)
-    )
-    static let hyprlandWindowIn = CubicConfig(
-        duration: 0.41,
-        controlPoint1: CGPoint(x: 0.23, y: 1.0),
-        controlPoint2: CGPoint(x: 0.32, y: 1.0)
-    )
-    // Hyprland `workspaces` (1.94 ds) uses the almostLinear bezier (0.5,0.5,0.75,1).
-    static let hyprlandWorkspaceSlide = CubicConfig(
-        duration: 0.194,
-        controlPoint1: CGPoint(x: 0.5, y: 0.5),
-        controlPoint2: CGPoint(x: 0.75, y: 1.0)
+    // Hyprland animates windows with its underdamped "easy" spring, not easeOutQuint
+    // (that curve drives borders there). y > 1 on cp1 encodes the spring's ~3% overshoot.
+    static let hyprlandDwindle = CubicConfig(
+        duration: 0.35,
+        controlPoint1: CGPoint(x: 0.34, y: 1.3),
+        controlPoint2: CGPoint(x: 0.64, y: 1.0)
     )
 
     func value(at progress: Double) -> Double {

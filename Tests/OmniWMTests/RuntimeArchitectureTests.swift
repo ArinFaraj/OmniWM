@@ -7,7 +7,7 @@ import XCTest
 
 final class RuntimeArchitectureTests: XCTestCase {
     func testHyprlandDwindleBezierStartsAndEndsAtBounds() {
-        let config = CubicConfig.hyprlandWindowMove
+        let config = CubicConfig.hyprlandDwindle
         let startTime = 4.0
         let animation = CubicAnimation(
             from: 0.0,
@@ -22,7 +22,7 @@ final class RuntimeArchitectureTests: XCTestCase {
     }
 
     func testHyprlandDwindleBezierIsMonotonicAndSnappy() {
-        let config = CubicConfig.hyprlandWindowMove
+        let config = CubicConfig.hyprlandDwindle
         let startTime = 9.0
         let animation = CubicAnimation(
             from: 0.0,
@@ -45,7 +45,7 @@ final class RuntimeArchitectureTests: XCTestCase {
     }
 
     func testDwindleRectAnimationRetargetsFromPresentedFrame() throws {
-        let config = CubicConfig.hyprlandWindowMove
+        let config = CubicConfig.hyprlandDwindle
         let node = DwindleNode(
             kind: .leaf(tile: DwindleTile(token: WindowToken(pid: 10, windowId: 20)))
         )
@@ -80,7 +80,7 @@ final class RuntimeArchitectureTests: XCTestCase {
     }
 
     func testDwindleRectAnimationUsesSingleProgressForFrameComponents() throws {
-        let config = CubicConfig.hyprlandWindowMove
+        let config = CubicConfig.hyprlandDwindle
         let node = DwindleNode(
             kind: .leaf(tile: DwindleTile(token: WindowToken(pid: 11, windowId: 21)))
         )
