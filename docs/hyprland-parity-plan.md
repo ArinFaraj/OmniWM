@@ -6,10 +6,15 @@ Goal: a macOS WM that feels fully like Hyprland. NO partial-SIP / Dock injection
 - Foreign-window SLS moves/transforms silently no-op (ownership model). AX is the honest real-move channel. Not a bug.
 - `SLSSetWindowTransform` works at 120fps on OWNED windows. Added to SkyLight.swift (optional-resolved, `setWindowTransform(wid:_:)`).
 - Off-screen/off-space capture returns LIVE pixels IFF the window keeps >=1px on some display (OmniWM parks at 1px = works). 0px overlap => hard error, not black. CONSTRAINT: never park a window fully off every display.
+- **SCStream stays LIVE on parked windows (probed 2026-07-18)**: a continuous `SCStream` on a window parked at 1px delivers full-rate content updates - 29.1fps sustained (30fps cap), 100% `status=complete`, 30 distinct content states in 5s from a ticking clock. Probe source kept in the session scratchpad (`scprobe.swift`; CLI needs `-parse-as-library` + `NSApplication.shared` init before any CGS call).
+  CONSEQUENCE: **live move/resize without SIP is viable** - park the real window (AX, legal), show its live-streaming texture on an owned proxy transformed at display rate, commit one real AX frame at gesture end. This was the "last 10-15%" previously believed to need Dock injection.
+- Close events arrive POST-destroy (`prepareManagedWindowRemoval` runs off the destroyed notification), so a proxy close can never capture at close time. The texture must already exist -> the backend wants a **WindowTextureCache**: a low-rate SCStream (or opportunistic snapshot refresh on focus change / N-second tick) per visible managed window, retaining the last frame. Every proxy channel (close, open-latency hiding, drag) then reads from the cache instead of racing a capture.
+- Multi-monitor validated (2026-07-18, 5120x1440 ultrawide + built-in): the per-display animation-slot model is contention-free across monitors - each display has its own slot and cross-monitor follow-moves keep both workspaces visible on their own monitors. All strand repros pass.
 - The smooth path is the owned-proxy model: capture window -> own a proxy surface -> animate the proxy (CoreAnimation on an owned NSPanel layer, OR SLSSetWindowTransform) -> settle the real window once. This is what Apple's Mission Control does internally.
 
 ## Key gap discovered
-Dwindle mode (what the user runs) has NO open or close animation at all - only window MOVES animate (CubicRectAnimation). The signature Hyprland window pop-in / pop-out is entirely absent. `startWindowCloseAnimation` is gated `layoutType != .dwindle` (AXEventHandler.swift:1242). This is the highest-value channel to add.
+~~Dwindle mode has NO open or close animation~~ RESOLVED 2026-07-18: dwindle now has frame-seeded pop-in (grow from 87%), close pop-out (AX shrink), and the incoming workspace slide - all strand-proofed (only the visible workspace animates; regression-tested). The user prefers the springy curve (0.35s, cp1 y=1.3 overshoot) over Hyprland's flat shipped defaults - do not "correct" it back.
+Remaining gap: all of these animate the REAL window via AX writes, so smoothness is capped by each app's AX responsiveness, and close cannot fade (foreign window). The proxy channels below lift that cap.
 
 ## Reusable infrastructure (already in the codebase)
 - Capture: `DragGhostController.captureWindowThumbnail(windowId:targetSize:)` (SCScreenshotManager + SCContentFilter(desktopIndependentWindow:)).
@@ -19,13 +24,12 @@ Dwindle mode (what the user runs) has NO open or close animation at all - only w
 - Hooks: new-window admission = `AXEventHandler.trackPreparedCreate`; close = `prepareManagedWindowRemoval` (AXEventHandler.swift:1225).
 
 ## Channel build order (each: build isolated -> test -> wire in -> verify)
-1. **Open pop-in (dwindle+niri)** — capturable (newborn exists), self-contained, biggest visible win.
-   Sequence: capture newborn -> park real at 1px (hidden) -> proxy NSPanel with image at tile frame, layer scale 0.85->1.0 + alpha 0->1 (~250ms, Hyprland popin easeish) -> on completion reveal real at tile (AX) + remove proxy.
-   SAFETY: a hard timeout MUST always reveal the real window even if capture/anim fails, so a window can never get stuck parked. Gate behind a `proxyOpenEnabled` flag, off until tested.
-   Watch: newborn blank-first-frame (capture after 1 runloop tick); flash-before-park race (Probe #3).
-2. **Close pop-out** — capture-timing race (window dying). Needs a snapshot from BEFORE destroy: keep a rolling last-snapshot per managed window (refresh on focus-out), animate that on close. Build after open.
-3. **Overview polish** — already owns surfaces; if thumbnails go live, move CGContext -> CALayer.contents=IOSurface.
-4. **Workspace slide (1:1 gesture)** — marquee. Real windows stay parked at 1px (capturable) during the slide; proxies (snapshots) animate; reveal real at end. Cleanest no-SIP channel (no double-image). Rebuild `workspaceSwitch` gesture like `columnScroll` (1:1). Flip `workspaceSlideEnabled` only when incoming renders via proxies. Gated on the transform calibration harness.
+0. **WindowTextureCache (foundation, build FIRST)** — one SCStream per visible managed window at low rate (10-15fps is plenty; bump to display rate only during an active gesture), retaining the last IOSurface. Cheap (probed: streams stay live even parked at 1px). Every channel below consumes it. Include: stream lifecycle tied to window admission/retirement, per-app opt-out, and a staleness stamp so consumers know the frame age.
+1. **Close pop-out via proxy** — now unblocked by the cache (close events are post-destroy; capture-at-close is impossible). On destroy: read cached texture -> proxy NSPanel at last frame -> scale to 87% + FADE out (the fade foreign windows can never do) -> teardown. Replaces the AX-shrink close (apps can refuse AX writes; a texture can't refuse).
+2. **Open pop-in via proxy** — capture newborn after 1 runloop tick -> park real at 1px -> proxy grows 87%->100% + fade in -> reveal real at tile. SAFETY: hard-timeout reveal is mandatory. `WindowPopInAnimator` (built, unused) is the skeleton.
+3. **Overview polish** — already owns surfaces; if thumbnails go live, feed them from the cache (CALayer.contents=IOSurface).
+4. **Workspace slide (1:1 gesture)** — marquee. Real windows stay parked at 1px during the slide; live-streamed proxies animate; reveal real at end. Rebuild `workspaceSwitch` gesture like `columnScroll` (1:1, interruptible, rubber-band at the ends).
+5. **Live move/resize (the "impossible" one)** — on drag start: park real, show live-streamed proxy under the cursor at display rate; on release: one AX commit + reveal. Resize shows the live texture scaled (content reflows once at commit - same compromise Hyprland makes mid-gesture with its own scaling). Gate behind a flag; ship last.
 
 ## Staged: open pop-in wiring (execute + VISUALLY VERIFY when screen is unlocked)
 Built + compiled: `WindowPopInAnimator` (Core/Animation/WindowPopInAnimator.swift) - owned NSPanel proxy, CoreAnimation scale 0.85->1.0 + fade over ~0.28s, easeOutQuint-ish curve, capture via SCScreenshotManager, onComplete GUARANTEED once (safety timeout). Wired to nothing yet.
