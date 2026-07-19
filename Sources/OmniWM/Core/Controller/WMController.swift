@@ -102,6 +102,11 @@ final class WMController {
     }
 
     let axManager = AXManager()
+    // Always-fresh last-frame textures for managed windows, so proxy animations (close
+    // pop-out first) have pixels in hand at destroy time. Tracking is reconciled by a
+    // coarse timer started in setEnabled.
+    let windowTextureCache = WindowTextureCache()
+    private var textureCacheSyncTimer: Timer?
     let traceCaptureCoordinator: RuntimeTraceCaptureCoordinator
     let appInfoCache = AppInfoCache()
     let eventIntake = EventIntake()
@@ -442,10 +447,29 @@ final class WMController {
         desiredEnabled = enabled
         if enabled {
             serviceLifecycleManager.start()
+            startTextureCacheSync()
         } else {
             serviceLifecycleManager.stop()
+            textureCacheSyncTimer?.invalidate()
+            textureCacheSyncTimer = nil
+            windowTextureCache.stopAll()
         }
         reconcileEnabledAndHotkeysState()
+    }
+
+    private func startTextureCacheSync() {
+        guard textureCacheSyncTimer == nil else { return }
+        let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let managedIds = Set(
+                    workspaceManager.allEntries().compactMap { CGWindowID(exactly: $0.windowId) }
+                )
+                windowTextureCache.syncTracking(managedIds: managedIds)
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        textureCacheSyncTimer = timer
     }
 
     func setHotkeysEnabled(_ enabled: Bool) {

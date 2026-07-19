@@ -6,6 +6,7 @@ import CoreMedia
 import CoreVideo
 import Foundation
 import ScreenCaptureKit
+import VideoToolbox
 
 /// Keeps a continuously refreshed last-frame texture for managed windows, so proxy
 /// animations always have pixels in hand. Close events arrive AFTER the window is
@@ -24,6 +25,14 @@ final class WindowTextureCache {
 
         var ioSurface: IOSurfaceRef? {
             CVPixelBufferGetIOSurface(pixelBuffer)?.takeUnretainedValue()
+        }
+
+        /// CALayer.contents only reliably renders CGImage/NSImage, so consumers that put
+        /// this texture on a layer convert once here (milliseconds, at animation start).
+        func makeCGImage() -> CGImage? {
+            var image: CGImage?
+            VTCreateCGImageFromCVPixelBuffer(pixelBuffer, options: nil, imageOut: &image)
+            return image
         }
 
         var age: CFTimeInterval {
@@ -114,6 +123,20 @@ final class WindowTextureCache {
         }
     }
 
+    /// Reconcile the tracked set against the currently managed windows. Called on a
+    /// coarse timer: a window opened moments ago simply has no texture yet (consumers
+    /// fall back), and a removed window's stream lingers at most one period. The cached
+    /// frame for a dying window stays readable until this runs - the close animation
+    /// reads it synchronously from the destroy event, well before the next sync.
+    func syncTracking(managedIds: Set<CGWindowID>) {
+        for id in managedIds where streams[id] == nil {
+            startTracking(windowId: id)
+        }
+        for id in trackedWindowIds where !managedIds.contains(id) {
+            stopTracking(windowId: id)
+        }
+    }
+
     /// Bump one window's stream to display rate for the duration of a gesture.
     func setHighRate(windowId: CGWindowID, enabled: Bool) {
         guard let box = streams[windowId] else { return }
@@ -129,8 +152,12 @@ final class WindowTextureCache {
         guard streams[windowId] == nil else { return }
         let filter = SCContentFilter(desktopIndependentWindow: window)
         let config = SCStreamConfiguration()
-        config.width = max(64, Int(window.frame.width))
-        config.height = max(64, Int(window.frame.height))
+        // Half resolution: these textures only ever back brief proxy animations
+        // (shrink-and-fade close, slide), where full res is imperceptible and doubles
+        // the memory of every idle stream.
+        config.width = max(64, Int(window.frame.width) / 2)
+        config.height = max(64, Int(window.frame.height) / 2)
+        config.scalesToFit = true
         config.minimumFrameInterval = Self.idleFrameInterval
         config.queueDepth = 3
         config.showsCursor = false

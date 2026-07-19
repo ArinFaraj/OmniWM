@@ -34,9 +34,11 @@ final class WindowProxyPanel: NSPanel {
         collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         isReleasedWhenClosed = false
 
+        // Layer-hosting view: the layer must be assigned BEFORE wantsLayer, or AppKit
+        // treats the view as layer-backed and the assigned layer never renders.
         let host = NSView()
-        host.wantsLayer = true
         host.layer = CALayer()
+        host.wantsLayer = true
         // Anchor at the center so a scale animation grows/shrinks about the middle,
         // keeping the proxy centered on the real window's frame.
         contentLayer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
@@ -61,11 +63,16 @@ final class WindowProxyPanel: NSPanel {
     override var canBecomeMain: Bool { false }
 
     /// `appKitFrame` must already be in AppKit (bottom-left origin) screen coordinates.
-    func install(image: CGImage, appKitFrame: CGRect) {
+    /// `contents` is anything CALayer.contents accepts (CGImage, IOSurfaceRef).
+    func install(contents: Any, appKitFrame: CGRect) {
         setFrame(appKitFrame, display: false)
         contentLayer.bounds = CGRect(origin: .zero, size: appKitFrame.size)
         contentLayer.position = CGPoint(x: appKitFrame.width / 2, y: appKitFrame.height / 2)
-        contentLayer.contents = image
+        contentLayer.contents = contents
+    }
+
+    func install(image: CGImage, appKitFrame: CGRect) {
+        install(contents: image, appKitFrame: appKitFrame)
     }
 }
 
@@ -152,6 +159,51 @@ final class WindowPopInAnimator {
             panel.contentLayer.add(fade, forKey: "popin-fade")
             CATransaction.commit()
         }
+    }
+
+    /// Hyprland windowsOut feel: quick shrink toward center plus the fade a foreign
+    /// window can never do. The real window is already dead when this plays - the
+    /// texture comes from WindowTextureCache, captured while the window was alive.
+    /// Self-contained: teardown is guaranteed by the animation completion OR the
+    /// safety timer, so a proxy panel can never linger.
+    func playPopOut(
+        windowId: Int,
+        contents: Any,
+        topLeftFrame: CGRect,
+        duration: TimeInterval = 0.22
+    ) {
+        guard panels[windowId] == nil else { return }
+        let appKit = ScreenCoordinateSpace.toAppKit(rect: topLeftFrame)
+        let panel = WindowProxyPanel()
+        panel.install(contents: contents, appKitFrame: appKit)
+        panels[windowId] = panel
+        panel.orderFront(nil)
+
+        var didComplete = false
+        let complete: () -> Void = { [weak self] in
+            guard !didComplete else { return }
+            didComplete = true
+            self?.teardown(windowId)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration + 0.6) { complete() }
+
+        CATransaction.begin()
+        CATransaction.setCompletionBlock { complete() }
+        let scale = CABasicAnimation(keyPath: "transform.scale")
+        scale.fromValue = 1.0
+        scale.toValue = 0.87
+        let fade = CABasicAnimation(keyPath: "opacity")
+        fade.fromValue = 1.0
+        fade.toValue = 0.0
+        for anim in [scale, fade] {
+            anim.duration = duration
+            anim.timingFunction = CAMediaTimingFunction(name: .easeOut)
+        }
+        panel.contentLayer.transform = CATransform3DMakeScale(0.87, 0.87, 1)
+        panel.contentLayer.opacity = 0
+        panel.contentLayer.add(scale, forKey: "popout-scale")
+        panel.contentLayer.add(fade, forKey: "popout-fade")
+        CATransaction.commit()
     }
 
     private func teardown(_ windowId: Int) {

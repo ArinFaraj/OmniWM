@@ -1247,9 +1247,57 @@ final class AXEventHandler {
         let shouldAnimate = controller.niriEngine?
             .findNode(for: entry.token, in: entry.workspaceId)?.isHiddenInTabbedMode != true
         if shouldAnimate {
-            controller.layoutRefreshController.startWindowCloseAnimation(entry: entry, monitor: monitor)
+            // Proxy pop-out first: an owned surface with the window's cached texture can
+            // shrink AND fade on the GPU, and a dead app can't refuse it the way it can
+            // refuse the AX-shrink writes. Falls back to the AX shrink when no texture
+            // exists yet (window younger than one cache sync, or capture unavailable).
+            if !playProxyCloseAnimation(entry: entry) {
+                controller.layoutRefreshController.startWindowCloseAnimation(entry: entry, monitor: monitor)
+            }
         }
         return (shouldRecoverFocus, closeRecoveryArmed)
+    }
+
+    // Field-tested 2026-07-19 and DISABLED: the destroy notification arrives only after
+    // the app's own window teardown is visible, so the ghost replays the close ~200ms
+    // late - the user sees the window shrink twice (the app/system's own close, then the
+    // proxy's shrink-and-fade from full size again). Without SIP there is no way to
+    // suppress the dying window's own visuals or get the texture on screen at t=0, so a
+    // post-destroy close ghost is structurally an echo, not a replacement. The proxy
+    // pipeline (WindowTextureCache + WindowProxyPanel) stays: the open/slide/drag
+    // channels control their own timeline and do not have this flaw.
+    private static let proxyCloseEnabled = false
+
+    private func playProxyCloseAnimation(entry: WindowState) -> Bool {
+        guard Self.proxyCloseEnabled, let controller else { return false }
+        guard controller.motionPolicy.animationsEnabled else {
+            Log.layout.notice("PROXYCLOSE skip: animations disabled")
+            return false
+        }
+        guard let windowId = CGWindowID(exactly: entry.windowId) else { return false }
+        guard let cached = controller.windowTextureCache.latestFrame(for: windowId) else {
+            Log.layout.notice("PROXYCLOSE skip: no cached texture for window \(entry.windowId) (tracked=\(controller.windowTextureCache.trackedWindowIds.count))")
+            return false
+        }
+        guard let image = cached.makeCGImage() else {
+            Log.layout.notice("PROXYCLOSE skip: could not make CGImage from cached frame")
+            return false
+        }
+        // The window is dying, so AX may already refuse frame reads; fall back to the
+        // last frame OmniWM itself applied.
+        guard let frame = AXWindowService.framePreferFast(entry.axRef)
+            ?? controller.axManager.lastAppliedFrame(for: entry.windowId)
+        else {
+            Log.layout.notice("PROXYCLOSE skip: no frame for window \(entry.windowId)")
+            return false
+        }
+        Log.layout.notice("PROXYCLOSE play: window \(entry.windowId) frame=\(Int(frame.origin.x)),\(Int(frame.origin.y)) \(Int(frame.width))x\(Int(frame.height)) age=\(String(format: "%.2f", cached.age))s")
+        WindowPopInAnimator.shared.playPopOut(
+            windowId: entry.windowId,
+            contents: image,
+            topLeftFrame: frame
+        )
+        return true
     }
 
     private func beginWindowCloseFocusRecovery(
