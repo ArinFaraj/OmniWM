@@ -457,7 +457,13 @@ final class WMController {
         reconcileEnabledAndHotkeysState()
     }
 
+    // No proxy channel currently consumes the texture cache (close pop-out was field-
+    // rejected; open/slide/drag proxies are not built yet), so keeping streams running
+    // would be pure overhead. Flip this on together with the first shipping consumer.
+    private static let textureCacheEnabled = false
+
     private func startTextureCacheSync() {
+        guard Self.textureCacheEnabled else { return }
         guard textureCacheSyncTimer == nil else { return }
         let timer = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
