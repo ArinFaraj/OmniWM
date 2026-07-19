@@ -9,6 +9,19 @@ import XCTest
 
 @MainActor
 final class FloatingCreatePlacementTests: XCTestCase {
+    // The fixtures build synthetic monitors with displayIds 1 and 3. Pin the main
+    // display so a real display with one of those ids (e.g. an external monitor that
+    // enumerates as 3) cannot flip isMain and reroute the fixture workspaces.
+    override func setUp() {
+        super.setUp()
+        Monitor.mainDisplayIdOverride = 1
+    }
+
+    override func tearDown() {
+        Monitor.mainDisplayIdOverride = nil
+        super.tearDown()
+    }
+
     func testTiledFocusConfirmationSetsLastTiledFocusedToken() {
         let workspaceId = WorkspaceDescriptor.ID()
         let token = WindowToken(pid: 5001, windowId: 11)

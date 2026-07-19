@@ -125,8 +125,14 @@ extension Monitor {
         frame.width >= frame.height ? .horizontal : .vertical
     }
 
+    /// Test seam: isMain consults the live CGMainDisplayID(), which makes any test that
+    /// builds synthetic monitors depend on whatever hardware the test host has plugged in
+    /// (a synthetic id that collides with the real main display flips workspace routing).
+    /// Tests pin this to a fixed id in setUp and clear it in tearDown.
+    nonisolated(unsafe) static var mainDisplayIdOverride: CGDirectDisplayID?
+
     var isMain: Bool {
-        let mainDisplayId = CGMainDisplayID()
+        let mainDisplayId = Self.mainDisplayIdOverride ?? CGMainDisplayID()
         if mainDisplayId != 0 {
             return displayId == mainDisplayId
         }

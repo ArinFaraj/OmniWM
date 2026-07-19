@@ -244,6 +244,18 @@ final class NiriInitialColumnWidthTests: XCTestCase {
     @MainActor
     func testHandlerSeedsAdmissionWidthBeforeFirstConstraintResolutionAndLeavesLiveStateUntouched() throws {
         let controller = makeController()
+        // Pin a synthetic monitor: without one the layout inherits the test host's real
+        // screen, and on a wide display 0.25 * width exceeds the 700 min-width clamp this
+        // test asserts (1800 wide -> 450 -> clamps to 700 on any hardware).
+        let monitor = Monitor(
+            id: .init(displayId: 1),
+            displayId: 1,
+            frame: CGRect(x: 0, y: 0, width: 1800, height: 1169),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1800, height: 1169),
+            hasNotch: false,
+            name: "Fixture"
+        )
+        controller.workspaceManager.applyMonitorConfigurationChange([monitor])
         let workspaceId = try XCTUnwrap(
             controller.workspaceManager.workspaceId(for: "1", createIfMissing: true)
         )
