@@ -136,6 +136,7 @@ enum AXWindowEnumerationError: Error, Sendable {
     case applicationUnavailable(AXError)
     case contextUnavailable
     case invalidApplicationWindows
+    case subscriptionFailed
     case timedOut
 }
 
@@ -356,13 +357,9 @@ enum AXWindowEnumerationInspector {
         deadline: TimeInterval,
         checkCancellation: () throws -> Void
     ) throws -> (enabled: Bool?, succeeded: Bool) {
-        guard AXWindowService.resolvedAttribute(value) else { return (nil, true) }
-        guard let value,
-              CFGetTypeID(value as CFTypeRef) == AXUIElementGetTypeID()
-        else {
-            return (nil, false)
-        }
-        let button = unsafeDowncast(value as AnyObject, to: AXUIElement.self)
+        let evidence = AXWindowService.fullscreenButtonEvidence(value)
+        guard evidence.succeeded else { return (nil, false) }
+        guard let button = evidence.element else { return (nil, true) }
         try setRemainingTimeout(on: button, until: deadline)
         defer { AXUIElementSetMessagingTimeout(button, 0) }
         var enabledValue: CFTypeRef?

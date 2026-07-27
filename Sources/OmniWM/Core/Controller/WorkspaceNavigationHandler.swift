@@ -9,6 +9,11 @@ import OmniWMIPC
 final class WorkspaceNavigationHandler {
     weak var controller: WMController?
 
+    private enum WorkspaceMoveFocusPolicy {
+        case configured
+        case alwaysFollow
+    }
+
     init(controller: WMController) {
         self.controller = controller
     }
@@ -60,61 +65,77 @@ final class WorkspaceNavigationHandler {
         controller.workspaceManager.interactionMonitorId ?? controller.monitorForInteraction()?.id
     }
 
-    private func affectedWorkspaceIds(
-        sourceWorkspaceId: WorkspaceDescriptor.ID?,
-        targetWorkspaceId: WorkspaceDescriptor.ID
-    ) -> Set<WorkspaceDescriptor.ID> {
-        var ids: Set<WorkspaceDescriptor.ID> = [targetWorkspaceId]
-        if let sourceWorkspaceId {
-            ids.insert(sourceWorkspaceId)
-        }
-        return ids
-    }
-
-    private func finishWorkspaceMove(_ mutation: StructuralMutation) {
+    private func finishWorkspaceMove(
+        _ mutation: StructuralMutation,
+        focusPolicy: WorkspaceMoveFocusPolicy = .configured
+    ) {
         guard let controller else { return }
         let sourceWorkspaceId = mutation.sourceWorkspaceId
-        let affectedWorkspaceIds = mutation.affectedWorkspaceIds
+        let destinationWorkspaceId = mutation.destinationWorkspaceId
 
         if let sourceMonitor = controller.workspaceManager.monitor(for: sourceWorkspaceId) {
             controller.layoutRefreshController.stopScrollAnimation(for: sourceMonitor.displayId)
         }
 
+        let gateWorkspaceIds: Set<WorkspaceDescriptor.ID>
         let postLayout: LayoutRefreshController.PostLayoutAction
-        if controller.settings.focusFollowsWindowToMonitor {
+        if focusPolicy == .alwaysFollow || controller.settings.focusFollowsWindowToMonitor {
             controller.isTransferringWindow = true
             defer { controller.isTransferringWindow = false }
 
-            if let targetMonitor = controller.workspaceManager.monitorForWorkspace(mutation.destinationWorkspaceId) {
+            if let targetMonitor = controller.workspaceManager.monitorForWorkspace(destinationWorkspaceId) {
                 _ = controller.workspaceManager.setActiveWorkspace(
-                    mutation.destinationWorkspaceId,
+                    destinationWorkspaceId,
                     on: targetMonitor.id
                 )
             }
 
             let focusToken = mutation.selectedHandle.id
+            gateWorkspaceIds = [destinationWorkspaceId]
             postLayout = { [weak controller] in
-                controller?.focusWindow(focusToken)
+                guard let controller,
+                      controller.activeWorkspace()?.id == destinationWorkspaceId,
+                      controller.workspaceManager.entry(for: focusToken)?.workspaceId == destinationWorkspaceId
+                else {
+                    return
+                }
+                controller.focusWindow(focusToken)
             }
         } else {
-            let handoff = resolveWorkspaceTransitionFocusHandoff(for: sourceWorkspaceId)
+            gateWorkspaceIds = [sourceWorkspaceId]
             postLayout = { [weak self, weak controller] in
-                guard let controller else { return }
-                if let focusToken = handoff.focusToken {
-                    controller.focusWindow(focusToken)
-                } else if handoff.shouldClearManagedFocus,
-                          controller.activeWorkspace()?.id == sourceWorkspaceId,
-                          controller.workspaceManager.entries(in: sourceWorkspaceId).isEmpty
+                guard let controller,
+                      controller.activeWorkspace()?.id == sourceWorkspaceId
+                else {
+                    return
+                }
+                if let focusToken = controller.resolveAndSetWorkspaceFocusToken(for: sourceWorkspaceId),
+                   controller.workspaceManager.entry(for: focusToken)?.workspaceId == sourceWorkspaceId
                 {
+                    controller.focusWindow(focusToken)
+                } else if controller.workspaceManager.entries(in: sourceWorkspaceId).isEmpty {
                     self?.clearManagedFocusAfterEmptyWorkspaceSwitch()
                 }
             }
         }
 
+        let newestFocusIntentId = controller.intentLedger.newestFocusIntentId()
+        let focusEpochSeq = controller.workspaceManager.worldSeq
+        let postLayoutIfFocusStillCurrent: LayoutRefreshController.PostLayoutAction = { [weak controller] in
+            guard let controller,
+                  controller.intentLedger.newestFocusIntentId() == newestFocusIntentId,
+                  controller.workspaceManager.isSeqEpochCurrent(focusEpochSeq, domains: .focus)
+            else {
+                return
+            }
+            postLayout()
+        }
         controller.layoutRefreshController.commitWorkspaceTransition(
-            affectedWorkspaces: affectedWorkspaceIds,
+            affectedWorkspaces: mutation.affectedWorkspaceIds,
             reason: .workspaceTransition,
-            postLayout: postLayout
+            postLayoutGateWorkspaceIds: gateWorkspaceIds,
+            postLayout: postLayoutIfFocusStillCurrent,
+            postLayoutInvalidated: postLayoutIfFocusStillCurrent
         )
     }
 
@@ -165,8 +186,9 @@ final class WorkspaceNavigationHandler {
 
         var state = controller.workspaceManager.niriViewportState(for: workspaceId)
         state.selectedNodeId = movedNode.id
-        let gap = CGFloat(controller.workspaceManager.gaps)
+        let gap = controller.innerGap(for: monitor)
         let workingFrame = controller.insetWorkingFrame(for: monitor)
+        let orientation = controller.settings.effectiveOrientation(for: monitor)
         controller.workspaceManager.withEngineMutationScope {
             engine.activateWindow(movedNode.id, in: workspaceId)
             engine.ensureSelectionVisible(
@@ -175,7 +197,8 @@ final class WorkspaceNavigationHandler {
                 motion: controller.motionPolicy.snapshot(),
                 state: &state,
                 workingFrame: workingFrame,
-                gaps: gap
+                gaps: gap,
+                orientation: orientation
             )
         }
         return state
@@ -311,31 +334,12 @@ final class WorkspaceNavigationHandler {
         guard let token = controller.workspaceManager.focusedToken else { return }
         guard let currentWsId = controller.workspaceManager.workspace(for: token) else { return }
 
-        controller.isTransferringWindow = true
-        defer { controller.isTransferringWindow = false }
-
         saveNiriViewportState(for: currentWsId)
         guard case let .changed(mutation) = moveWindowToMonitor(
             handle: WindowHandle(id: token),
             direction: direction
         ) else { return }
-        guard let targetMonitor = controller.workspaceManager.monitor(for: mutation.destinationWorkspaceId) else {
-            return
-        }
-
-        _ = controller.workspaceManager.setActiveWorkspace(mutation.destinationWorkspaceId, on: targetMonitor.id)
-
-        if let sourceMonitor = controller.workspaceManager.monitor(for: currentWsId) {
-            controller.layoutRefreshController.stopScrollAnimation(for: sourceMonitor.displayId)
-        }
-
-        controller.layoutRefreshController.commitWorkspaceTransition(
-            affectedWorkspaces: mutation.affectedWorkspaceIds,
-            reason: .workspaceTransition,
-            postLayoutGateWorkspaceIds: [mutation.destinationWorkspaceId]
-        ) { [weak controller] in
-            controller?.focusWindow(token)
-        }
+        finishWorkspaceMove(mutation, focusPolicy: .alwaysFollow)
     }
 
     func moveWindowToMonitor(
@@ -497,6 +501,30 @@ final class WorkspaceNavigationHandler {
                 controller?.focusWindow(focusToken)
             }
         }
+    }
+
+    func moveWorkspaceToMonitor(
+        _ workspaceId: WorkspaceDescriptor.ID,
+        direction: Direction,
+        force: Bool
+    ) -> WorkspaceMonitorMoveOutcome? {
+        guard let controller,
+              let sourceMonitor = controller.workspaceManager.monitorForWorkspace(workspaceId),
+              let targetMonitor = controller.workspaceManager.adjacentMonitor(
+                  from: sourceMonitor.id,
+                  direction: direction
+              )
+        else {
+            return nil
+        }
+
+        let outcome = controller.workspaceManager.moveWorkspaceToMonitor(
+            workspaceId,
+            to: targetMonitor.id,
+            force: force
+        )
+        controller.layoutRefreshController.commitWorkspaceMonitorTransition(outcome)
+        return outcome
     }
 
     func switchWorkspace(index: Int) {
@@ -823,7 +851,7 @@ final class WorkspaceNavigationHandler {
                 }
 
                 if targetIsDwindle, engine.findNode(for: token, in: sourceWsId) != nil {
-                    controller.workspaceManager.captureNiriColumnWidthState(for: token, in: sourceWsId)
+                    controller.workspaceManager.captureDetachedNiriPlacement(for: token, in: sourceWsId)
                     engine.removeWindow(token: token, in: sourceWsId)
                 }
 
@@ -932,71 +960,16 @@ final class WorkspaceNavigationHandler {
     func moveFocusedWindow(toRawWorkspaceID rawWorkspaceID: String) {
         guard let controller else { return }
         guard let token = controller.workspaceManager.focusedToken else { return }
-        guard let targetId = controller.workspaceManager.workspaceId(for: rawWorkspaceID, createIfMissing: false),
-              let target = controller.workspaceManager.descriptor(for: targetId)
-        else {
-            return
-        }
-        let currentWorkspaceId = controller.workspaceManager.workspace(for: token)
-        let transferResult = transferWindowFromSourceEngine(token: token, from: currentWorkspaceId, to: target.id)
-        guard transferResult.succeeded else {
-            Log.layout.error("window transfer failed token=\(token) to=\(target.name)")
-            return
-        }
-        Log.layout.info("window moved token=\(token) to workspace=\(target.name) follow=\(controller.settings.focusFollowsWindowToMonitor)")
-        if let currentWorkspaceId {
-            recoverSourceFocus(after: transferResult, from: currentWorkspaceId)
-        }
+        guard let targetWorkspaceId = controller.workspaceManager.workspaceId(
+            for: rawWorkspaceID,
+            createIfMissing: false
+        ) else { return }
+        guard case let .changed(mutation) = moveWindow(
+            handle: WindowHandle(id: token),
+            toWorkspaceId: targetWorkspaceId
+        ) else { return }
 
-        let shouldFollowFocus = controller.settings.focusFollowsWindowToMonitor
-        if shouldFollowFocus {
-            controller.isTransferringWindow = true
-            defer { controller.isTransferringWindow = false }
-
-            let targetMonitor = controller.workspaceManager.monitorForWorkspace(target.id)
-            if let targetMonitor {
-                _ = controller.workspaceManager.setActiveWorkspace(target.id, on: targetMonitor.id)
-            }
-
-            if let currentWorkspaceId,
-               let sourceMonitor = controller.workspaceManager.monitor(for: currentWorkspaceId)
-            {
-                controller.layoutRefreshController.stopScrollAnimation(for: sourceMonitor.displayId)
-            }
-            applySessionPatch(
-                workspaceId: target.id,
-                viewportState: transferredWindowNiriViewportState(token: token, workspaceId: target.id),
-                rememberedFocusToken: token
-            )
-            controller.layoutRefreshController.commitWorkspaceTransition(
-                affectedWorkspaces: affectedWorkspaceIds(
-                    sourceWorkspaceId: currentWorkspaceId,
-                    targetWorkspaceId: target.id
-                ),
-                reason: .workspaceTransition
-            ) { [weak controller] in
-                controller?.focusWindow(token)
-            }
-        } else {
-            let focusToken = currentWorkspaceId.flatMap { controller.resolveAndSetWorkspaceFocusToken(for: $0) }
-
-            if let currentWorkspaceId,
-               let sourceMonitor = controller.workspaceManager.monitor(for: currentWorkspaceId)
-            {
-                controller.layoutRefreshController.stopScrollAnimation(for: sourceMonitor.displayId)
-            }
-            controller.layoutRefreshController.commitWorkspaceTransition(
-                affectedWorkspaces: affectedWorkspaceIds(
-                    sourceWorkspaceId: currentWorkspaceId,
-                    targetWorkspaceId: target.id
-                ),
-                reason: .workspaceTransition
-            ) { [weak controller] in
-                if let focusToken {
-                    controller?.focusWindow(focusToken)
-                }
-            }
-        }
+        finishWorkspaceMove(mutation)
     }
 
     @discardableResult
@@ -1118,8 +1091,9 @@ final class WorkspaceNavigationHandler {
 
         let movedTokens = column.windowNodes.map(\.token)
         let targetWorkingFrame = controller.insetWorkingFrame(for: targetMonitor)
-        let gaps = CGFloat(controller.workspaceManager.gaps)
+        let gaps = controller.innerGap(for: targetMonitor)
         let motion = controller.motionPolicy.snapshot()
+        let orientation = controller.settings.effectiveOrientation(for: targetMonitor)
         guard let result = controller.workspaceManager.withBatchedWorkspaceMove(
             sourceWorkspaceId: sourceWorkspaceId,
             targetWorkspaceId: targetWorkspaceId,
@@ -1129,7 +1103,8 @@ final class WorkspaceNavigationHandler {
                     from: sourceWorkspaceId,
                     to: targetWorkspaceId,
                     sourceState: &sourceState,
-                    targetState: &targetState
+                    targetState: &targetState,
+                    targetOrientation: orientation
                 ) else { return nil }
                 engine.activateWindow(windowNode.id, in: targetWorkspaceId)
                 targetState.selectedNodeId = windowNode.id
@@ -1139,7 +1114,8 @@ final class WorkspaceNavigationHandler {
                     motion: motion,
                     state: &targetState,
                     workingFrame: targetWorkingFrame,
-                    gaps: gaps
+                    gaps: gaps,
+                    orientation: orientation
                 )
                 return (moveResult, movedTokens)
             }
@@ -1257,30 +1233,6 @@ final class WorkspaceNavigationHandler {
             monitorDirection: monitorDirection
         ) else { return }
 
-        let shouldFollowFocus = controller.settings.focusFollowsWindowToMonitor
-
-        if shouldFollowFocus {
-            if let monitor = controller.workspaceManager.monitorForWorkspace(mutation.destinationWorkspaceId) {
-                _ = controller.workspaceManager.setActiveWorkspace(mutation.destinationWorkspaceId, on: monitor.id)
-            }
-
-            controller.layoutRefreshController.commitWorkspaceTransition(
-                affectedWorkspaces: mutation.affectedWorkspaceIds,
-                reason: .workspaceTransition
-            ) { [weak controller] in
-                controller?.focusWindow(token)
-            }
-        } else {
-            let focusToken = controller.resolveAndSetWorkspaceFocusToken(for: mutation.sourceWorkspaceId)
-
-            controller.layoutRefreshController.commitWorkspaceTransition(
-                affectedWorkspaces: mutation.affectedWorkspaceIds,
-                reason: .workspaceTransition
-            ) { [weak controller] in
-                if let focusToken {
-                    controller?.focusWindow(focusToken)
-                }
-            }
-        }
+        finishWorkspaceMove(mutation)
     }
 }

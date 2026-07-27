@@ -7,6 +7,25 @@ import Foundation
 import XCTest
 
 final class SettingsTOMLCodecTests: XCTestCase {
+    func testMonitorInnerGapOverrideRoundTrips() throws {
+        var export = SettingsExport.defaults()
+        export.monitorGapSettings = [
+            MonitorGapSettings(
+                monitorName: "Built-in",
+                monitorDisplayId: 7,
+                innerGap: 6,
+                outerGapTop: 20
+            )
+        ]
+
+        let data = try SettingsTOMLCodec.encode(export)
+        let decoded = try SettingsTOMLCodec.decode(data)
+
+        XCTAssertEqual(decoded.monitorGapSettings, export.monitorGapSettings)
+        let toml = String(decoding: data, as: UTF8.self)
+        XCTAssertTrue(toml.contains("innerGap = 6.0"))
+    }
+
     func testLoadingReinjectsNewlyAddedDefaultActionsMissingFromFile() throws {
         var export = SettingsExport.defaults()
         let customTrigger = HotkeyTrigger.chord(
@@ -222,7 +241,7 @@ final class SettingsTOMLCodecTests: XCTestCase {
         XCTAssertEqual(export.workspaceSwipeAxis, "diagonal")
 
         let settings = makeSettingsStore()
-        settings.applyExport(export, monitors: [])
+        settings.applyExport(export)
 
         XCTAssertEqual(settings.workspaceSwipeFingerCount, .three)
         XCTAssertEqual(settings.workspaceSwipeAxis, .vertical)
@@ -238,7 +257,7 @@ final class SettingsTOMLCodecTests: XCTestCase {
         export.workspaceSwipeAxis = WorkspaceSwipeAxis.horizontal.rawValue
 
         let settings = makeSettingsStore()
-        settings.applyExport(export, monitors: [])
+        settings.applyExport(export)
 
         XCTAssertEqual(settings.workspaceSwipeAxis, .horizontal)
         XCTAssertTrue(settings.workspaceSwipeAxisLockedToVertical)

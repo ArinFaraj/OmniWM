@@ -10,6 +10,12 @@ import OmniWMIPC
 final class SettingsStore {
     private nonisolated static let defaultExport = SettingsExport.defaults()
 
+    private struct NormalizedWorkspaceBarIconOverride {
+        let foldedBundleID: String
+        let bundleID: String
+        let value: String
+    }
+
     private let persistence: SettingsFilePersistence
     private let runtimeState: RuntimeStateStore
     private let autosaveEnabled: Bool
@@ -49,19 +55,20 @@ final class SettingsStore {
         didSet { scheduleSave() }
     }
 
-    var niriColumnWidthPresets = SettingsStore.validatedPresets(
-        SettingsStore.defaultExport.niriColumnWidthPresets ?? BuiltInSettingsDefaults.niriColumnWidthPresets
+    var niriContainerPrimarySpanPresets = SettingsStore.validatedContainerPrimarySpanPresets(
+        SettingsStore.defaultExport.niriContainerPrimarySpanPresets ?? BuiltInSettingsDefaults
+            .niriContainerPrimarySpanPresets
     ) {
         didSet { scheduleSave() }
     }
 
-    var niriDefaultColumnWidth = SettingsStore.validatedDefaultColumnWidth(
-        SettingsStore.defaultExport.niriDefaultColumnWidth
+    var niriDefaultContainerPrimarySpan = SettingsStore.validatedDefaultContainerPrimarySpan(
+        SettingsStore.defaultExport.niriDefaultContainerPrimarySpan
     ) {
         didSet {
-            let validated = SettingsStore.validatedDefaultColumnWidth(niriDefaultColumnWidth)
-            if validated != niriDefaultColumnWidth {
-                niriDefaultColumnWidth = validated
+            let validated = SettingsStore.validatedDefaultContainerPrimarySpan(niriDefaultContainerPrimarySpan)
+            if validated != niriDefaultContainerPrimarySpan {
+                niriDefaultContainerPrimarySpan = validated
                 return
             }
             scheduleSave()
@@ -88,6 +95,15 @@ final class SettingsStore {
         didSet { scheduleSave() }
     }
 
+    func applyMonitorSetup(
+        routingSettings: [MonitorRoutingSettings],
+        mouseWarpEnabled: Bool
+    ) {
+        monitorRoutingSettings = routingSettings
+        monitorRoutingMode = .custom
+        self.mouseWarpEnabled = mouseWarpEnabled
+    }
+
     var gapSize = SettingsStore.defaultExport.gapSize {
         didSet { scheduleSave() }
     }
@@ -108,7 +124,7 @@ final class SettingsStore {
         didSet { scheduleSave() }
     }
 
-    var niriMaxVisibleColumns = SettingsStore.defaultExport.niriMaxVisibleColumns {
+    var niriVisibleContainerCount = SettingsStore.defaultExport.niriVisibleContainerCount {
         didSet { scheduleSave() }
     }
 
@@ -127,7 +143,7 @@ final class SettingsStore {
     }
 
     var niriSingleWindowFit = SingleWindowFit(
-        serialized: SettingsStore.defaultExport.niriSingleWindowAspectRatio
+        serialized: SettingsStore.defaultExport.niriSingleWindowFit
     ) {
         didSet { scheduleSave() }
     }
@@ -246,6 +262,12 @@ final class SettingsStore {
         didSet { scheduleSave() }
     }
 
+    private(set) var workspaceBarIconOverrides = SettingsStore.normalizedWorkspaceBarIconOverrides(
+        SettingsStore.defaultExport.workspaceBarIconOverrides
+    ) {
+        didSet { scheduleSave() }
+    }
+
     var workspaceBarReserveLayoutSpace = SettingsStore.defaultExport.workspaceBarReserveLayoutSpace {
         didSet { scheduleSave() }
     }
@@ -328,7 +350,7 @@ final class SettingsStore {
     }
 
     var dwindleSingleWindowFit = SingleWindowFit(
-        serialized: SettingsStore.defaultExport.dwindleSingleWindowAspectRatio
+        serialized: SettingsStore.defaultExport.dwindleSingleWindowFit
     ) {
         didSet { scheduleSave() }
     }
@@ -517,6 +539,26 @@ final class SettingsStore {
         didSet { scheduleSave() }
     }
 
+    var quakeTerminalBackgroundEffect = QuakeTerminalBackgroundEffect(
+        rawValue: SettingsStore.defaultExport.quakeTerminalBackgroundEffect
+    ) ?? .standardBlur {
+        didSet { scheduleSave() }
+    }
+
+    var quakeTerminalBackgroundBlurRadius = SettingsStore.defaultExport.quakeTerminalBackgroundBlurRadius
+        ?? QuakeTerminalAppearancePolicy.disabledBackgroundBlurRadius
+    {
+        didSet {
+            let normalized = QuakeTerminalAppearancePolicy
+                .normalizedBackgroundBlurRadius(quakeTerminalBackgroundBlurRadius)
+            if normalized != quakeTerminalBackgroundBlurRadius {
+                quakeTerminalBackgroundBlurRadius = normalized
+                return
+            }
+            scheduleSave()
+        }
+    }
+
     var quakeTerminalMonitorMode = QuakeTerminalMonitorMode(
         rawValue: SettingsStore.defaultExport.quakeTerminalMonitorMode ?? ""
     ) ?? .focusedWindow {
@@ -577,6 +619,10 @@ final class SettingsStore {
         set { runtimeState.hasSeenIssueWalkthrough = newValue }
     }
 
+    var monitorSetupStatus = RuntimeStateStore.defaultMonitorSetupStatus {
+        didSet { runtimeState.monitorSetupStatus = monitorSetupStatus }
+    }
+
     init(
         persistence: SettingsFilePersistence = SettingsFilePersistence(),
         runtimeState: RuntimeStateStore = RuntimeStateStore(),
@@ -586,6 +632,7 @@ final class SettingsStore {
         self.runtimeState = runtimeState
         self.autosaveEnabled = autosaveEnabled
         commandPaletteLastMode = runtimeState.commandPaletteLastMode
+        monitorSetupStatus = runtimeState.monitorSetupStatus
         isApplyingRuntimeState = true
         quakeTerminalCustomFrameStorage = QuakeTerminalGeometryPolicy.normalizedCustomFrame(
             runtimeState.quakeTerminalCustomFrame
@@ -594,10 +641,7 @@ final class SettingsStore {
         isApplyingRuntimeState = false
         syncQuakeTerminalCustomFrameToRuntimeState()
 
-        applyExport(
-            persistence.load(),
-            monitors: Monitor.current()
-        )
+        applyExport(persistence.load())
         persistence.setExternalChangeHandler { [weak self] export in
             self?.handleExternalReload(export)
         }
@@ -640,13 +684,13 @@ final class SettingsStore {
             outerGapRight: outerGapRight,
             outerGapTop: outerGapTop,
             outerGapBottom: outerGapBottom,
-            niriMaxVisibleColumns: niriMaxVisibleColumns,
+            niriVisibleContainerCount: niriVisibleContainerCount,
             niriInfiniteLoop: niriInfiniteLoop,
             niriCenterFocusedColumn: niriCenterFocusedColumn.rawValue,
             niriAlwaysCenterSingleColumn: niriAlwaysCenterSingleColumn,
-            niriSingleWindowAspectRatio: niriSingleWindowFit.serialized,
-            niriColumnWidthPresets: niriColumnWidthPresets,
-            niriDefaultColumnWidth: niriDefaultColumnWidth,
+            niriSingleWindowFit: niriSingleWindowFit.serialized,
+            niriContainerPrimarySpanPresets: niriContainerPrimarySpanPresets,
+            niriDefaultContainerPrimarySpan: niriDefaultContainerPrimarySpan,
             workspaceConfigurations: workspaceConfigurations,
             defaultLayoutType: defaultLayoutType.rawValue,
             bordersEnabled: bordersEnabled,
@@ -675,6 +719,7 @@ final class SettingsStore {
             workspaceBarExcludedBundleIDs: SettingsStore.sortedWorkspaceBarExcludedBundleIDs(
                 workspaceBarExcludedBundleIDs
             ),
+            workspaceBarIconOverrides: workspaceBarIconOverrides,
             workspaceBarReserveLayoutSpace: workspaceBarReserveLayoutSpace,
             workspaceBarRevealModifier: workspaceBarRevealModifier.rawValue,
             workspaceBarRevealHoldMilliseconds: workspaceBarRevealHoldMilliseconds,
@@ -691,11 +736,11 @@ final class SettingsStore {
             dwindleSmartSplit: dwindleSmartSplit,
             dwindleDefaultSplitRatio: dwindleDefaultSplitRatio,
             dwindleSplitWidthMultiplier: dwindleSplitWidthMultiplier,
-            dwindleSingleWindowAspectRatio: dwindleSingleWindowFit.serialized,
+            dwindleSingleWindowFit: dwindleSingleWindowFit.serialized,
             dwindleUseGlobalGaps: dwindleUseGlobalGaps,
             dwindleMoveToRootStable: dwindleMoveToRootStable,
             monitorDwindleSettings: monitorDwindleSettings,
-            monitorGapSettings: monitorGapSettings,
+            monitorGapSettings: monitorGapSettings.filter(\.hasOverrides),
             preventSleepEnabled: preventSleepEnabled,
             updateChecksEnabled: updateChecksEnabled,
             ipcEnabled: ipcEnabled,
@@ -727,12 +772,14 @@ final class SettingsStore {
             quakeTerminalAnimationDuration: quakeTerminalAnimationDuration,
             quakeTerminalAutoHide: quakeTerminalAutoHide,
             quakeTerminalOpacity: quakeTerminalOpacity,
+            quakeTerminalBackgroundEffect: quakeTerminalBackgroundEffect.rawValue,
+            quakeTerminalBackgroundBlurRadius: quakeTerminalBackgroundBlurRadius,
             quakeTerminalMonitorMode: quakeTerminalMonitorMode.rawValue,
             appearanceMode: appearanceMode.rawValue
         )
     }
 
-    func applyExport(_ export: SettingsExport, monitors: [Monitor]) {
+    func applyExport(_ export: SettingsExport) {
         let baseline = SettingsStore.defaultExport
         isApplyingExport = true
         defer { isApplyingExport = false }
@@ -748,27 +795,26 @@ final class SettingsStore {
         mouseWarpEnabled = export.mouseWarpEnabled
         cursorContainmentEnabled = export.cursorContainmentEnabled
         monitorRoutingMode = MonitorRoutingMode(rawValue: export.monitorRoutingMode) ?? .macOS
-        monitorRoutingSettings = SettingsStore.reboundMonitorSettings(export.monitorRoutingSettings, monitors: monitors)
+        monitorRoutingSettings = export.monitorRoutingSettings
         gapSize = export.gapSize
         outerGapLeft = export.outerGapLeft
         outerGapRight = export.outerGapRight
         outerGapTop = export.outerGapTop
         outerGapBottom = export.outerGapBottom
 
-        niriMaxVisibleColumns = export.niriMaxVisibleColumns
+        niriVisibleContainerCount = export.niriVisibleContainerCount
         niriInfiniteLoop = export.niriInfiniteLoop
         niriCenterFocusedColumn = CenterFocusedColumn(rawValue: export.niriCenterFocusedColumn) ?? .never
         niriAlwaysCenterSingleColumn = export.niriAlwaysCenterSingleColumn
-        niriSingleWindowFit = SingleWindowFit(serialized: export.niriSingleWindowAspectRatio)
-        niriColumnWidthPresets = SettingsStore.validatedPresets(
-            export.niriColumnWidthPresets ?? baseline.niriColumnWidthPresets ?? SettingsStore.defaultColumnWidthPresets
+        niriSingleWindowFit = SingleWindowFit(serialized: export.niriSingleWindowFit)
+        niriContainerPrimarySpanPresets = SettingsStore.validatedContainerPrimarySpanPresets(
+            export.niriContainerPrimarySpanPresets ?? baseline.niriContainerPrimarySpanPresets ?? SettingsStore
+                .defaultContainerPrimarySpanPresets
         )
-        niriDefaultColumnWidth = SettingsStore.validatedDefaultColumnWidth(export.niriDefaultColumnWidth)
+        niriDefaultContainerPrimarySpan = SettingsStore
+            .validatedDefaultContainerPrimarySpan(export.niriDefaultContainerPrimarySpan)
 
-        workspaceConfigurations = SettingsStore.normalizedWorkspaceConfigurations(
-            export.workspaceConfigurations,
-            monitors: monitors
-        )
+        workspaceConfigurations = SettingsStore.normalizedWorkspaceConfigurations(export.workspaceConfigurations)
         defaultLayoutType = LayoutType(rawValue: export.defaultLayoutType) ?? .niri
 
         bordersEnabled = export.bordersEnabled
@@ -812,6 +858,9 @@ final class SettingsStore {
         workspaceBarExcludedBundleIDs = SettingsStore.normalizedWorkspaceBarExcludedBundleIDs(
             export.workspaceBarExcludedBundleIDs
         )
+        workspaceBarIconOverrides = SettingsStore.normalizedWorkspaceBarIconOverrides(
+            export.workspaceBarIconOverrides
+        )
         workspaceBarReserveLayoutSpace = export.workspaceBarReserveLayoutSpace
         workspaceBarRevealModifier = WorkspaceBarRevealModifier(rawValue: export.workspaceBarRevealModifier) ?? .off
         workspaceBarRevealHoldMilliseconds = SettingsStore.validatedWorkspaceBarRevealHoldMilliseconds(
@@ -823,29 +872,20 @@ final class SettingsStore {
         workspaceBarYOffset = export.workspaceBarYOffset
         workspaceBarAccentColor = export.workspaceBarAccentColor
         workspaceBarTextColor = export.workspaceBarTextColor
-        monitorBarSettings = SettingsStore.reboundMonitorSettings(export.monitorBarSettings, monitors: monitors)
+        monitorBarSettings = export.monitorBarSettings
 
         appRules = export.appRules
-        monitorOrientationSettings = SettingsStore.reboundMonitorSettings(
-            export.monitorOrientationSettings,
-            monitors: monitors
-        )
-        monitorNiriSettings = SettingsStore.reboundMonitorSettings(export.monitorNiriSettings, monitors: monitors)
+        monitorOrientationSettings = export.monitorOrientationSettings
+        monitorNiriSettings = export.monitorNiriSettings
 
         dwindleSmartSplit = export.dwindleSmartSplit
         dwindleDefaultSplitRatio = export.dwindleDefaultSplitRatio
         dwindleSplitWidthMultiplier = export.dwindleSplitWidthMultiplier
-        dwindleSingleWindowFit = SingleWindowFit(serialized: export.dwindleSingleWindowAspectRatio)
+        dwindleSingleWindowFit = SingleWindowFit(serialized: export.dwindleSingleWindowFit)
         dwindleUseGlobalGaps = export.dwindleUseGlobalGaps
         dwindleMoveToRootStable = export.dwindleMoveToRootStable
-        monitorDwindleSettings = SettingsStore.reboundMonitorSettings(
-            export.monitorDwindleSettings,
-            monitors: monitors
-        )
-        monitorGapSettings = SettingsStore.reboundMonitorSettings(
-            export.monitorGapSettings,
-            monitors: monitors
-        )
+        monitorDwindleSettings = export.monitorDwindleSettings
+        monitorGapSettings = export.monitorGapSettings.filter(\.hasOverrides)
 
         preventSleepEnabled = export.preventSleepEnabled
         updateChecksEnabled = export.updateChecksEnabled
@@ -883,6 +923,14 @@ final class SettingsStore {
         quakeTerminalAnimationDuration = export.quakeTerminalAnimationDuration
         quakeTerminalAutoHide = export.quakeTerminalAutoHide
         quakeTerminalOpacity = export.quakeTerminalOpacity ?? baseline.quakeTerminalOpacity ?? 1.0
+        quakeTerminalBackgroundEffect = QuakeTerminalBackgroundEffect(
+            rawValue: export.quakeTerminalBackgroundEffect
+        ) ?? .standardBlur
+        quakeTerminalBackgroundBlurRadius = QuakeTerminalAppearancePolicy.normalizedBackgroundBlurRadius(
+            export.quakeTerminalBackgroundBlurRadius
+                ?? baseline.quakeTerminalBackgroundBlurRadius
+                ?? QuakeTerminalAppearancePolicy.disabledBackgroundBlurRadius
+        )
         quakeTerminalMonitorMode = QuakeTerminalMonitorMode(
             rawValue: export.quakeTerminalMonitorMode ?? baseline.quakeTerminalMonitorMode ?? ""
         ) ?? .focusedWindow
@@ -902,7 +950,7 @@ final class SettingsStore {
     }
 
     private func handleExternalReload(_ export: SettingsExport) {
-        applyExport(export, monitors: Monitor.current())
+        applyExport(export)
         onExternalSettingsReloaded?()
     }
 
@@ -991,24 +1039,9 @@ final class SettingsStore {
         workspaceConfigurations.first(where: { $0.name == workspaceName })?.effectiveDisplayName ?? workspaceName
     }
 
-    static func normalizedWorkspaceConfigurations(
-        _ configs: [WorkspaceConfiguration],
-        monitors: [Monitor] = []
-    ) -> [WorkspaceConfiguration] {
+    static func normalizedWorkspaceConfigurations(_ configs: [WorkspaceConfiguration]) -> [WorkspaceConfiguration] {
         var seen: Set<String> = []
-        let rebound = configs.map { config in
-            guard case let .specificDisplay(output) = config.monitorAssignment,
-                  let resolvedMonitor = output.resolveMonitor(in: monitors)
-            else {
-                return config
-            }
-
-            var updated = config
-            updated.monitorAssignment = .specificDisplay(OutputId(from: resolvedMonitor))
-            return updated
-        }
-
-        let normalized = rebound
+        let normalized = configs
             .filter { WorkspaceIDPolicy.normalizeRawID($0.name) != nil }
             .filter { seen.insert($0.name).inserted }
             .sorted { WorkspaceIDPolicy.sortsBefore($0.name, $1.name) }
@@ -1020,63 +1053,20 @@ final class SettingsStore {
         return normalized
     }
 
-    private static func reboundMonitorSettings<T: MonitorSettingsType>(
-        _ settings: [T],
-        monitors: [Monitor]
-    ) -> [T] {
-        settings.map { setting in
-            var rebound = setting
-            rebound.monitorDisplayId = reboundMonitorDisplayId(
-                rebound.monitorDisplayId,
-                monitorName: rebound.monitorName,
-                monitors: monitors
-            )
-            return rebound
-        }
-    }
-
-    private static func reboundMonitorDisplayId(
-        _ displayId: CGDirectDisplayID?,
-        monitorName: String,
-        monitors: [Monitor]
-    ) -> CGDirectDisplayID? {
-        if let displayId,
-           monitors.contains(where: { $0.displayId == displayId })
-        {
-            return displayId
-        }
-
-        let matches = monitors.filter { $0.name.caseInsensitiveCompare(monitorName) == .orderedSame }
-        guard matches.count == 1 else { return nil }
-        return matches[0].displayId
-    }
-
     func barSettings(for monitor: Monitor) -> MonitorBarSettings? {
         MonitorSettingsStore.get(for: monitor, in: monitorBarSettings)
     }
 
-    func barSettings(for monitorName: String) -> MonitorBarSettings? {
-        MonitorSettingsStore.get(for: monitorName, in: monitorBarSettings)
-    }
-
-    func updateBarSettings(_ settings: MonitorBarSettings) {
-        MonitorSettingsStore.update(settings, in: &monitorBarSettings)
+    func updateBarSettings(_ settings: MonitorBarSettings, for monitor: Monitor) {
+        MonitorSettingsStore.update(settings, for: monitor, in: &monitorBarSettings)
     }
 
     func removeBarSettings(for monitor: Monitor) {
         MonitorSettingsStore.remove(for: monitor, from: &monitorBarSettings)
     }
 
-    func removeBarSettings(for monitorName: String) {
-        MonitorSettingsStore.remove(for: monitorName, from: &monitorBarSettings)
-    }
-
     func resolvedBarSettings(for monitor: Monitor) -> ResolvedBarSettings {
         resolvedBarSettings(override: barSettings(for: monitor))
-    }
-
-    func resolvedBarSettings(for monitorName: String) -> ResolvedBarSettings {
-        resolvedBarSettings(override: barSettings(for: monitorName))
     }
 
     private func resolvedBarSettings(override: MonitorBarSettings?) -> ResolvedBarSettings {
@@ -1129,16 +1119,51 @@ final class SettingsStore {
         return true
     }
 
+    func workspaceBarIconOverrideValue(for rawBundleID: String) -> String? {
+        let bundleID = rawBundleID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !bundleID.isEmpty else { return nil }
+        return workspaceBarIconOverrides.first { storedBundleID, _ in
+            storedBundleID.caseInsensitiveCompare(bundleID) == .orderedSame
+        }?.value
+    }
+
+    @discardableResult
+    func setWorkspaceBarIconOverride(_ rawValue: String, for rawBundleID: String) -> Bool {
+        let bundleID = rawBundleID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !bundleID.isEmpty, !value.isEmpty else { return false }
+
+        if let storedBundleID = workspaceBarIconOverrides.keys.first(where: {
+            $0.caseInsensitiveCompare(bundleID) == .orderedSame
+        }) {
+            guard workspaceBarIconOverrides[storedBundleID] != value else { return false }
+            workspaceBarIconOverrides[storedBundleID] = value
+            return true
+        }
+
+        workspaceBarIconOverrides[bundleID] = value
+        return true
+    }
+
+    @discardableResult
+    func removeWorkspaceBarIconOverride(for rawBundleID: String) -> Bool {
+        let bundleID = rawBundleID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !bundleID.isEmpty else { return false }
+        guard let storedBundleID = workspaceBarIconOverrides.keys.first(where: {
+            $0.caseInsensitiveCompare(bundleID) == .orderedSame
+        }) else {
+            return false
+        }
+        workspaceBarIconOverrides.removeValue(forKey: storedBundleID)
+        return true
+    }
+
     func appRule(for bundleId: String) -> AppRule? {
         appRules.first { $0.bundleId == bundleId }
     }
 
     func orientationSettings(for monitor: Monitor) -> MonitorOrientationSettings? {
         MonitorSettingsStore.get(for: monitor, in: monitorOrientationSettings)
-    }
-
-    func orientationSettings(for monitorName: String) -> MonitorOrientationSettings? {
-        MonitorSettingsStore.get(for: monitorName, in: monitorOrientationSettings)
     }
 
     func effectiveOrientation(for monitor: Monitor) -> Monitor.Orientation {
@@ -1150,24 +1175,20 @@ final class SettingsStore {
         return monitor.autoOrientation
     }
 
-    func updateOrientationSettings(_ settings: MonitorOrientationSettings) {
-        MonitorSettingsStore.update(settings, in: &monitorOrientationSettings)
+    func updateOrientationSettings(_ settings: MonitorOrientationSettings, for monitor: Monitor) {
+        MonitorSettingsStore.update(settings, for: monitor, in: &monitorOrientationSettings)
     }
 
     func removeOrientationSettings(for monitor: Monitor) {
         MonitorSettingsStore.remove(for: monitor, from: &monitorOrientationSettings)
     }
 
-    func removeOrientationSettings(for monitorName: String) {
-        MonitorSettingsStore.remove(for: monitorName, from: &monitorOrientationSettings)
-    }
-
     func routingSettings(for monitor: Monitor) -> MonitorRoutingSettings? {
         MonitorSettingsStore.get(for: monitor, in: monitorRoutingSettings)
     }
 
-    func updateRoutingSettings(_ settings: MonitorRoutingSettings) {
-        MonitorSettingsStore.update(settings, in: &monitorRoutingSettings)
+    func updateRoutingSettings(_ settings: MonitorRoutingSettings, for monitor: Monitor) {
+        MonitorSettingsStore.update(settings, for: monitor, in: &monitorRoutingSettings)
     }
 
     func removeRoutingSettings(for monitor: Monitor) {
@@ -1178,33 +1199,21 @@ final class SettingsStore {
         MonitorSettingsStore.get(for: monitor, in: monitorNiriSettings)
     }
 
-    func niriSettings(for monitorName: String) -> MonitorNiriSettings? {
-        MonitorSettingsStore.get(for: monitorName, in: monitorNiriSettings)
-    }
-
-    func updateNiriSettings(_ settings: MonitorNiriSettings) {
-        MonitorSettingsStore.update(settings, in: &monitorNiriSettings)
+    func updateNiriSettings(_ settings: MonitorNiriSettings, for monitor: Monitor) {
+        MonitorSettingsStore.update(settings, for: monitor, in: &monitorNiriSettings)
     }
 
     func removeNiriSettings(for monitor: Monitor) {
         MonitorSettingsStore.remove(for: monitor, from: &monitorNiriSettings)
     }
 
-    func removeNiriSettings(for monitorName: String) {
-        MonitorSettingsStore.remove(for: monitorName, from: &monitorNiriSettings)
-    }
-
     func resolvedNiriSettings(for monitor: Monitor) -> ResolvedNiriSettings {
         resolvedNiriSettings(override: niriSettings(for: monitor))
     }
 
-    func resolvedNiriSettings(for monitorName: String) -> ResolvedNiriSettings {
-        resolvedNiriSettings(override: niriSettings(for: monitorName))
-    }
-
     private func resolvedNiriSettings(override: MonitorNiriSettings?) -> ResolvedNiriSettings {
         return ResolvedNiriSettings(
-            maxVisibleColumns: override?.maxVisibleColumns ?? niriMaxVisibleColumns,
+            visibleContainerCount: override?.visibleContainerCount ?? niriVisibleContainerCount,
             centerFocusedColumn: override?.centerFocusedColumn ?? niriCenterFocusedColumn,
             alwaysCenterSingleColumn: override?.alwaysCenterSingleColumn ?? niriAlwaysCenterSingleColumn,
             singleWindowFit: override?.singleWindowFit ?? niriSingleWindowFit,
@@ -1216,31 +1225,25 @@ final class SettingsStore {
         MonitorSettingsStore.get(for: monitor, in: monitorDwindleSettings)
     }
 
-    func dwindleSettings(for monitorName: String) -> MonitorDwindleSettings? {
-        MonitorSettingsStore.get(for: monitorName, in: monitorDwindleSettings)
-    }
-
-    func updateDwindleSettings(_ settings: MonitorDwindleSettings) {
-        MonitorSettingsStore.update(settings, in: &monitorDwindleSettings)
+    func updateDwindleSettings(_ settings: MonitorDwindleSettings, for monitor: Monitor) {
+        MonitorSettingsStore.update(settings, for: monitor, in: &monitorDwindleSettings)
     }
 
     func removeDwindleSettings(for monitor: Monitor) {
         MonitorSettingsStore.remove(for: monitor, from: &monitorDwindleSettings)
     }
 
-    func removeDwindleSettings(for monitorName: String) {
-        MonitorSettingsStore.remove(for: monitorName, from: &monitorDwindleSettings)
-    }
-
     func resolvedDwindleSettings(for monitor: Monitor) -> ResolvedDwindleSettings {
-        resolvedDwindleSettings(override: dwindleSettings(for: monitor))
+        resolvedDwindleSettings(
+            override: dwindleSettings(for: monitor),
+            sharedInnerGap: resolvedGapSettings(for: monitor).innerGap
+        )
     }
 
-    func resolvedDwindleSettings(for monitorName: String) -> ResolvedDwindleSettings {
-        resolvedDwindleSettings(override: dwindleSettings(for: monitorName))
-    }
-
-    private func resolvedDwindleSettings(override: MonitorDwindleSettings?) -> ResolvedDwindleSettings {
+    private func resolvedDwindleSettings(
+        override: MonitorDwindleSettings?,
+        sharedInnerGap: CGFloat
+    ) -> ResolvedDwindleSettings {
         let useGlobalGaps = override?.useGlobalGaps ?? dwindleUseGlobalGaps
         return ResolvedDwindleSettings(
             smartSplit: override?.smartSplit ?? dwindleSmartSplit,
@@ -1248,7 +1251,7 @@ final class SettingsStore {
             splitWidthMultiplier: CGFloat(override?.splitWidthMultiplier ?? dwindleSplitWidthMultiplier),
             singleWindowFit: override?.singleWindowFit ?? dwindleSingleWindowFit,
             useGlobalGaps: useGlobalGaps,
-            innerGap: useGlobalGaps ? CGFloat(gapSize) : CGFloat(override?.innerGap ?? gapSize)
+            innerGap: useGlobalGaps ? sharedInnerGap : CGFloat(override?.innerGap ?? gapSize)
         )
     }
 
@@ -1256,25 +1259,22 @@ final class SettingsStore {
         MonitorSettingsStore.get(for: monitor, in: monitorGapSettings)
     }
 
-    func gapSettings(for monitorName: String) -> MonitorGapSettings? {
-        MonitorSettingsStore.get(for: monitorName, in: monitorGapSettings)
-    }
-
-    func updateGapSettings(_ settings: MonitorGapSettings) {
-        MonitorSettingsStore.update(settings, in: &monitorGapSettings)
+    func updateGapSettings(_ settings: MonitorGapSettings, for monitor: Monitor) {
+        if settings.hasOverrides {
+            MonitorSettingsStore.update(settings, for: monitor, in: &monitorGapSettings)
+        } else {
+            MonitorSettingsStore.remove(for: monitor, from: &monitorGapSettings)
+        }
     }
 
     func removeGapSettings(for monitor: Monitor) {
         MonitorSettingsStore.remove(for: monitor, from: &monitorGapSettings)
     }
 
-    func removeGapSettings(for monitorName: String) {
-        MonitorSettingsStore.remove(for: monitorName, from: &monitorGapSettings)
-    }
-
     func resolvedGapSettings(for monitor: Monitor) -> ResolvedGapSettings {
         let override = gapSettings(for: monitor)
         return ResolvedGapSettings(
+            innerGap: resolvedInnerGap(override?.innerGap),
             outerGapLeft: CGFloat(override?.outerGapLeft ?? outerGapLeft),
             outerGapRight: CGFloat(override?.outerGapRight ?? outerGapRight),
             outerGapTop: CGFloat(override?.outerGapTop ?? outerGapTop),
@@ -1282,17 +1282,22 @@ final class SettingsStore {
         )
     }
 
-    nonisolated static let defaultColumnWidthPresets: [Double] = BuiltInSettingsDefaults.niriColumnWidthPresets
+    private func resolvedInnerGap(_ override: Double?) -> CGFloat {
+        CGFloat(min(64, max(0, override ?? gapSize)))
+    }
 
-    static func validatedPresets(_ presets: [Double]) -> [Double] {
+    nonisolated static let defaultContainerPrimarySpanPresets: [Double] = BuiltInSettingsDefaults
+        .niriContainerPrimarySpanPresets
+
+    static func validatedContainerPrimarySpanPresets(_ presets: [Double]) -> [Double] {
         let result = presets.map { min(1.0, max(0.05, $0)) }
         if result.count < 2 {
-            return defaultColumnWidthPresets
+            return defaultContainerPrimarySpanPresets
         }
         return result
     }
 
-    static func validatedDefaultColumnWidth(_ width: Double?) -> Double? {
+    static func validatedDefaultContainerPrimarySpan(_ width: Double?) -> Double? {
         guard let width else { return nil }
         return min(1.0, max(0.05, width))
     }
@@ -1351,6 +1356,36 @@ final class SettingsStore {
             let order = lhs.caseInsensitiveCompare(rhs)
             return order == .orderedSame ? lhs < rhs : order == .orderedAscending
         }
+    }
+
+    static func normalizedWorkspaceBarIconOverrides(_ overrides: [String: String]) -> [String: String] {
+        let candidates = overrides.compactMap { rawBundleID, rawValue -> NormalizedWorkspaceBarIconOverride? in
+            let bundleID = rawBundleID.trimmingCharacters(in: .whitespacesAndNewlines)
+            let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !bundleID.isEmpty, !value.isEmpty else { return nil }
+            return NormalizedWorkspaceBarIconOverride(
+                foldedBundleID: bundleID.lowercased(),
+                bundleID: bundleID,
+                value: value
+            )
+        }.sorted { lhs, rhs in
+            if lhs.foldedBundleID != rhs.foldedBundleID {
+                return lhs.foldedBundleID < rhs.foldedBundleID
+            }
+            if lhs.bundleID != rhs.bundleID {
+                return lhs.bundleID < rhs.bundleID
+            }
+            return lhs.value < rhs.value
+        }
+
+        var normalized: [String: String] = [:]
+        normalized.reserveCapacity(candidates.count)
+        var seenBundleIDs: Set<String> = []
+        seenBundleIDs.reserveCapacity(candidates.count)
+        for candidate in candidates where seenBundleIDs.insert(candidate.foldedBundleID).inserted {
+            normalized[candidate.bundleID] = candidate.value
+        }
+        return normalized
     }
 
     static func validatedHiddenBarRehideIntervalSeconds(_ value: Double) -> Double {

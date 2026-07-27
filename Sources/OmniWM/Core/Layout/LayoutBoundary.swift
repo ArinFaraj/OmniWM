@@ -36,6 +36,7 @@ struct WorkspaceRefreshInput {
 struct NiriWindowRemovalSeed {
     let removedNodeIds: [NodeId]
     let oldFrames: [WindowToken: CGRect]
+    let removedColumn: Bool
 }
 
 struct NiriWorkspaceSnapshot {
@@ -67,6 +68,19 @@ struct LayoutFrameChange {
     let token: WindowToken
     let frame: CGRect
     let forceApply: Bool
+    let allowsTerminalRecovery: Bool
+
+    init(
+        token: WindowToken,
+        frame: CGRect,
+        forceApply: Bool,
+        allowsTerminalRecovery: Bool = false
+    ) {
+        self.token = token
+        self.frame = frame
+        self.forceApply = forceApply
+        self.allowsTerminalRecovery = allowsTerminalRecovery
+    }
 }
 
 struct LayoutRestoreChange {

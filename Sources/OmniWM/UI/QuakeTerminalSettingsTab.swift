@@ -7,6 +7,12 @@ struct QuakeTerminalSettingsTab: View {
     @Bindable var settings: SettingsStore
     @Bindable var controller: WMController
 
+    private var blurValueText: String {
+        settings.quakeTerminalBackgroundBlurRadius == QuakeTerminalAppearancePolicy.disabledBackgroundBlurRadius
+            ? "Off"
+            : "\(settings.quakeTerminalBackgroundBlurRadius)"
+    }
+
     var body: some View {
         Form {
             Section("Quake Terminal") {
@@ -54,6 +60,15 @@ struct QuakeTerminalSettingsTab: View {
                 }
 
                 Section("Appearance") {
+                    Picker("Background Effect", selection: $settings.quakeTerminalBackgroundEffect) {
+                        ForEach(QuakeTerminalBackgroundEffect.allCases, id: \.self) { effect in
+                            Text(effect.displayName).tag(effect)
+                        }
+                    }
+                    .onChange(of: settings.quakeTerminalBackgroundEffect) { _, _ in
+                        controller.reloadQuakeTerminalBackgroundEffect()
+                    }
+
                     SettingsSliderRow(
                         label: "Quake Background Opacity",
                         value: $settings.quakeTerminalOpacity,
@@ -63,6 +78,33 @@ struct QuakeTerminalSettingsTab: View {
                     )
                     .onChange(of: settings.quakeTerminalOpacity) { _, _ in
                         controller.reloadQuakeTerminalOpacity()
+                    }
+
+                    SettingsSliderRow(
+                        label: "Background Blur",
+                        value: Binding(
+                            get: { Double(settings.quakeTerminalBackgroundBlurRadius) },
+                            set: { settings.quakeTerminalBackgroundBlurRadius = Int($0.rounded()) }
+                        ),
+                        range: Double(QuakeTerminalAppearancePolicy.minimumBackgroundBlurRadius)
+                            ... Double(QuakeTerminalAppearancePolicy.maximumBackgroundBlurRadius),
+                        step: 5,
+                        valueText: blurValueText
+                    )
+                    .onChange(of: settings.quakeTerminalBackgroundBlurRadius) { _, _ in
+                        controller.reloadQuakeTerminalBackgroundBlur()
+                    }
+                    .disabled(settings.quakeTerminalBackgroundEffect != .standardBlur)
+
+                    if settings.quakeTerminalBackgroundEffect != .standardBlur {
+                        SettingsCaption(
+                            "The saved Standard Blur radius is preserved and becomes active again when Standard Blur is selected."
+                        )
+                    } else if QuakeTerminalAppearancePolicy.backgroundBlurIsHiddenByOpaqueBackground(
+                        radius: settings.quakeTerminalBackgroundBlurRadius,
+                        opacity: settings.quakeTerminalOpacity
+                    ) {
+                        SettingsCaption("Blur only shows through a translucent terminal - lower the opacity to see it.")
                     }
                 }
 

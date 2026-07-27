@@ -98,14 +98,25 @@ final class ServiceLifecycleManager {
 
     private func startServices() {
         guard let controller, !controller.hasStartedServices else { return }
+        if refreshMonitorConfigurationForServiceStart(currentMonitors: Monitor.current()) {
+            controller.syncMonitorsToNiriEngine()
+        }
         controller.hasStartedServices = true
         controller.reconcileEnabledAndHotkeysState()
         controller.eventIntake.open(sink: controller.eventInterpreter)
         controller.layoutRefreshController.setup()
         controller.axEventHandler.setup()
         controller.axManager.installWorkspaceObservers()
-        controller.axManager.onAppLaunched = { _ in
+        controller.axManager.onAppLaunched = { [weak controller] app in
+            controller?.refreshUnavailableWorkspaceBarIconOverride(
+                bundleId: app.bundleIdentifier
+            )
             EventIntake.post(.appLaunched)
+        }
+        for app in NSWorkspace.shared.runningApplications {
+            controller.refreshUnavailableWorkspaceBarIconOverride(
+                bundleId: app.bundleIdentifier
+            )
         }
         controller.axManager.onAppTerminated = { pid in
             EventIntake.post(.appTerminated(pid: pid))
@@ -113,8 +124,11 @@ final class ServiceLifecycleManager {
         controller.axManager.onTerminalFrameRefusal = { [weak controller] refusal in
             controller?.axEventHandler.handleTerminalFrameRefusal(refusal)
         }
-        controller.axManager.onFrameApplySucceeded = { [weak controller] windowId in
-            controller?.axEventHandler.clearTerminalFrameFailure(windowId: windowId)
+        controller.axManager.onFrameApplySucceeded = { [weak self] result in
+            self?.handleFrameApplySucceeded(result)
+        }
+        controller.axManager.onManagedWindowBindingFailed = { [weak controller] in
+            controller?.layoutRefreshController.requestFullRescan(reason: .staleFullRescan)
         }
         setupWorkspaceObservation()
         controller.mouseEventHandler.setup()
@@ -133,6 +147,13 @@ final class ServiceLifecycleManager {
         performStartupRefresh()
         startSecureInputMonitor()
         startLockScreenObserver()
+    }
+
+    func handleFrameApplySucceeded(_ result: AXFrameApplyResult) {
+        guard let controller else { return }
+        controller.axEventHandler.clearTerminalFrameFailure(windowId: result.windowId)
+        guard result.writeResult.observedFrame != nil, result.confirmedFrame != nil else { return }
+        controller.surfaceReconciler.handleVerifiedFrameApplySuccess(result)
     }
 
     private func startLockScreenObserver() {
@@ -179,8 +200,8 @@ final class ServiceLifecycleManager {
 
     func handleDisplayEvent(_ event: DisplayConfigurationObserver.DisplayEvent) {
         switch event {
-        case let .disconnected(monitorId, outputId):
-            handleMonitorDisconnect(monitorId: monitorId, outputId: outputId)
+        case let .disconnected(monitorId):
+            handleMonitorDisconnect(monitorId: monitorId)
         case .connected,
              .reconfigured:
             break
@@ -188,10 +209,10 @@ final class ServiceLifecycleManager {
         handleMonitorConfigurationChanged()
     }
 
-    private func handleMonitorDisconnect(monitorId: Monitor.ID, outputId: OutputId) {
+    private func handleMonitorDisconnect(monitorId: Monitor.ID) {
         guard let controller else { return }
         controller.layoutRefreshController.cleanupForMonitorDisconnect(
-            displayId: outputId.displayId,
+            displayId: monitorId.displayId,
             migrateAnimations: false
         )
 
@@ -205,13 +226,21 @@ final class ServiceLifecycleManager {
         applyMonitorConfigurationChanged(currentMonitors: Monitor.current())
     }
 
+    @discardableResult
+    func refreshMonitorConfigurationForServiceStart(currentMonitors: [Monitor]) -> Bool {
+        guard let controller else { return false }
+        guard isUsableMonitorConfiguration(currentMonitors) else { return false }
+        guard controller.workspaceManager.monitors != currentMonitors else { return false }
+        controller.workspaceManager.applyMonitorConfigurationChange(currentMonitors)
+        return true
+    }
+
     func applyMonitorConfigurationChanged(
         currentMonitors: [Monitor],
         performPostUpdateActions: Bool = true
     ) {
         guard let controller else { return }
-        guard !currentMonitors.isEmpty else { return }
-        guard currentMonitors.allSatisfy({ $0.frame.width > 1 && $0.frame.height > 1 }) else { return }
+        guard isUsableMonitorConfiguration(currentMonitors) else { return }
 
         controller.workspaceManager.applyMonitorConfigurationChange(currentMonitors)
         controller.resetMouseWarpTransientState()
@@ -228,15 +257,29 @@ final class ServiceLifecycleManager {
         controller.reapplyQuakeTerminalGeometryForMonitorChange()
     }
 
+    private func isUsableMonitorConfiguration(_ monitors: [Monitor]) -> Bool {
+        !monitors.isEmpty
+            && monitors.allSatisfy { $0.frame.width > 1 && $0.frame.height > 1 }
+    }
+
     func handleAppTerminated(pid: pid_t) {
         guard let controller else { return }
         controller.axEventHandler.cleanupFocusStateForTerminatedApp(pid: pid)
-        let removedTokens = controller.workspaceManager.entries(forPid: pid).map(\.token)
-        for token in removedTokens {
-            controller.cleanupScratchpadWindowResourcesIfNeeded(for: token)
-            controller.axManager.removeWindowState(pid: token.pid, windowId: token.windowId)
-        }
+        let removedEntries = controller.workspaceManager.entries(forPid: pid)
+        let scratchpadTokens = Set(removedEntries.compactMap { entry in
+            let token = entry.token
+            return controller.workspaceManager.isScratchpadToken(token)
+                || controller.workspaceManager.hiddenState(for: token)?.isScratchpad == true
+                ? token
+                : nil
+        })
         let affectedWorkspaces = controller.workspaceManager.removeWindowsForApp(pid: pid)
+        for entry in removedEntries {
+            controller.axManager.removeWindowState(pid: entry.pid, expectedWindow: entry.axRef)
+            if scratchpadTokens.contains(entry.token) {
+                controller.cleanupScratchpadWindowResources(for: entry.token)
+            }
+        }
         for workspaceId in affectedWorkspaces {
             if let monitorId = controller.workspaceManager.monitorId(for: workspaceId),
                controller.workspaceManager.activeWorkspace(on: monitorId)?.id == workspaceId
@@ -260,6 +303,7 @@ final class ServiceLifecycleManager {
     func handleUnlockDetected() {
         guard let controller else { return }
         controller.layoutRefreshController.requestFullRescan(reason: .unlock)
+        controller.mouseEventHandler.requestMultitouchRevalidation(.unlock)
     }
 
     func performStartupRefresh() {
@@ -384,6 +428,7 @@ final class ServiceLifecycleManager {
         controller.axManager.onAppTerminated = nil
         controller.axManager.onTerminalFrameRefusal = nil
         controller.axManager.onFrameApplySucceeded = nil
+        controller.axManager.onManagedWindowBindingFailed = nil
         controller.workspaceManager.onGapsChanged = nil
 
         controller.layoutRefreshController.resetState()

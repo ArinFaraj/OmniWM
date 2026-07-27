@@ -10,14 +10,19 @@ final class SettingsWindowController {
 
     private let presenter = HostedWindowPresenter()
     private let navigation = SettingsNavigationModel()
+    private let windowCornerPreferences = GlobalWindowCornerPreferences()
 
     func show(
         settings: SettingsStore,
         controller: WMController,
         updateCoordinator: (any AppUpdateCoordinating)? = nil,
-        section: SettingsSection? = nil
+        section: SettingsSection? = nil,
+        presentMonitorSetup: Bool = false
     ) {
-        if let section {
+        windowCornerPreferences.refresh()
+        if presentMonitorSetup {
+            navigation.requestMonitorSetupPresentation()
+        } else if let section {
             navigation.section = section
         }
 
@@ -30,6 +35,7 @@ final class SettingsWindowController {
             SettingsView(
                 settings: settings,
                 controller: controller,
+                windowCornerPreferences: windowCornerPreferences,
                 updateCoordinator: updateCoordinator,
                 navigation: navigation
             )

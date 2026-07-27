@@ -50,6 +50,7 @@ extension NiriLayoutEngine {
         state: inout ViewportState,
         workingFrame: CGRect,
         gaps: CGFloat,
+        orientation: Monitor.Orientation,
         targetRowIndex: Int? = nil
     ) -> NiriNode? {
         moveSelectionCrossContainer(
@@ -61,6 +62,7 @@ extension NiriLayoutEngine {
             workingFrame: workingFrame,
             gaps: gaps,
             orientation: .horizontal,
+            viewportOrientation: orientation,
             targetSiblingIndex: targetRowIndex
         )
     }
@@ -74,6 +76,7 @@ extension NiriLayoutEngine {
         workingFrame: CGRect,
         gaps: CGFloat,
         orientation: Monitor.Orientation,
+        viewportOrientation: Monitor.Orientation,
         targetSiblingIndex: Int? = nil
     ) -> NiriNode? {
         guard let step = direction.primaryStep(for: orientation) else { return nil }
@@ -96,7 +99,7 @@ extension NiriLayoutEngine {
             state: &state,
             workingFrame: workingFrame,
             gaps: gaps,
-            orientation: orientation
+            orientation: viewportOrientation
         )
 
         return newSelection
@@ -174,12 +177,18 @@ extension NiriLayoutEngine {
         state: inout ViewportState,
         workingFrame: CGRect,
         gaps: CGFloat,
-        orientation: Monitor.Orientation = .horizontal,
+        orientation: Monitor.Orientation,
         animationConfig: SpringConfig? = nil,
         fromContainerIndex: Int? = nil,
         previousActiveContainerPosition: CGFloat? = nil
     ) {
         assertSanctionedMutation()
+        resolvePrimaryContainerSpans(
+            in: workspaceId,
+            workingFrame: workingFrame,
+            gaps: gaps,
+            orientation: orientation
+        )
         let containers = columns(in: workspaceId)
         guard !containers.isEmpty else { return }
 
@@ -246,6 +255,29 @@ extension NiriLayoutEngine {
         state.selectionProgress = 0.0
     }
 
+    func resolvePrimaryContainerSpans(
+        in workspaceId: WorkspaceDescriptor.ID,
+        workingFrame: CGRect,
+        gaps: CGFloat,
+        orientation: Monitor.Orientation
+    ) {
+        for container in columns(in: workspaceId) {
+            switch orientation {
+            case .horizontal where container.cachedWidth <= 0:
+                container.resolveAndCacheWidth(
+                    workingAreaWidth: workingFrame.width,
+                    gaps: gaps,
+                    contentInset: tabContentInset(for: container)
+                )
+            case .vertical where container.cachedHeight <= 0:
+                container.resolveAndCacheHeight(workingAreaHeight: workingFrame.height, gaps: gaps)
+            case .horizontal,
+                 .vertical:
+                break
+            }
+        }
+    }
+
     func focusTarget(
         direction: Direction,
         currentSelection: NiriNode,
@@ -254,7 +286,7 @@ extension NiriLayoutEngine {
         state: inout ViewportState,
         workingFrame: CGRect,
         gaps: CGFloat,
-        orientation: Monitor.Orientation = .horizontal
+        orientation: Monitor.Orientation
     ) -> NiriNode? {
         assertSanctionedMutation()
         if direction.primaryStep(for: orientation) != nil {
@@ -266,7 +298,8 @@ extension NiriLayoutEngine {
                 state: &state,
                 workingFrame: workingFrame,
                 gaps: gaps,
-                orientation: orientation
+                orientation: orientation,
+                viewportOrientation: orientation
             )
         }
 
@@ -299,6 +332,7 @@ extension NiriLayoutEngine {
         state: inout ViewportState,
         workingFrame: CGRect,
         gaps: CGFloat,
+        orientation: Monitor.Orientation,
         targetRowIndex: Int? = nil
     ) -> NiriNode? {
         if let target = moveSelectionVertical(direction: verticalDirection, currentSelection: currentSelection) {
@@ -308,7 +342,8 @@ extension NiriLayoutEngine {
                 motion: motion,
                 state: &state,
                 workingFrame: workingFrame,
-                gaps: gaps
+                gaps: gaps,
+                orientation: orientation
             )
             return target
         }
@@ -321,6 +356,7 @@ extension NiriLayoutEngine {
             state: &state,
             workingFrame: workingFrame,
             gaps: gaps,
+            orientation: orientation,
             targetRowIndex: targetRowIndex
         )
     }
@@ -331,7 +367,8 @@ extension NiriLayoutEngine {
         motion: MotionSnapshot,
         state: inout ViewportState,
         workingFrame: CGRect,
-        gaps: CGFloat
+        gaps: CGFloat,
+        orientation: Monitor.Orientation
     ) -> NiriNode? {
         assertSanctionedMutation()
         return focusCombined(
@@ -343,6 +380,7 @@ extension NiriLayoutEngine {
             state: &state,
             workingFrame: workingFrame,
             gaps: gaps,
+            orientation: orientation,
             targetRowIndex: Int.max
         )
     }
@@ -353,7 +391,8 @@ extension NiriLayoutEngine {
         motion: MotionSnapshot,
         state: inout ViewportState,
         workingFrame: CGRect,
-        gaps: CGFloat
+        gaps: CGFloat,
+        orientation: Monitor.Orientation
     ) -> NiriNode? {
         assertSanctionedMutation()
         return focusCombined(
@@ -364,7 +403,8 @@ extension NiriLayoutEngine {
             motion: motion,
             state: &state,
             workingFrame: workingFrame,
-            gaps: gaps
+            gaps: gaps,
+            orientation: orientation
         )
     }
 
@@ -375,7 +415,8 @@ extension NiriLayoutEngine {
         motion: MotionSnapshot,
         state: inout ViewportState,
         workingFrame: CGRect,
-        gaps: CGFloat
+        gaps: CGFloat,
+        orientation: Monitor.Orientation
     ) -> NiriNode? {
         let cols = columns(in: workspaceId)
         guard cols.indices.contains(targetIndex) else { return nil }
@@ -397,7 +438,8 @@ extension NiriLayoutEngine {
             motion: motion,
             state: &state,
             workingFrame: workingFrame,
-            gaps: gaps
+            gaps: gaps,
+            orientation: orientation
         )
         return target
     }
@@ -408,7 +450,8 @@ extension NiriLayoutEngine {
         motion: MotionSnapshot,
         state: inout ViewportState,
         workingFrame: CGRect,
-        gaps: CGFloat
+        gaps: CGFloat,
+        orientation: Monitor.Orientation
     ) -> NiriNode? {
         assertSanctionedMutation()
         return focusColumnByIndex(
@@ -418,7 +461,8 @@ extension NiriLayoutEngine {
             motion: motion,
             state: &state,
             workingFrame: workingFrame,
-            gaps: gaps
+            gaps: gaps,
+            orientation: orientation
         )
     }
 
@@ -428,7 +472,8 @@ extension NiriLayoutEngine {
         motion: MotionSnapshot,
         state: inout ViewportState,
         workingFrame: CGRect,
-        gaps: CGFloat
+        gaps: CGFloat,
+        orientation: Monitor.Orientation
     ) -> NiriNode? {
         assertSanctionedMutation()
         let cols = columns(in: workspaceId)
@@ -440,7 +485,8 @@ extension NiriLayoutEngine {
             motion: motion,
             state: &state,
             workingFrame: workingFrame,
-            gaps: gaps
+            gaps: gaps,
+            orientation: orientation
         )
     }
 
@@ -451,7 +497,8 @@ extension NiriLayoutEngine {
         motion: MotionSnapshot,
         state: inout ViewportState,
         workingFrame: CGRect,
-        gaps: CGFloat
+        gaps: CGFloat,
+        orientation: Monitor.Orientation
     ) -> NiriNode? {
         assertSanctionedMutation()
         return focusColumnByIndex(
@@ -461,7 +508,8 @@ extension NiriLayoutEngine {
             motion: motion,
             state: &state,
             workingFrame: workingFrame,
-            gaps: gaps
+            gaps: gaps,
+            orientation: orientation
         )
     }
 
@@ -472,7 +520,8 @@ extension NiriLayoutEngine {
         motion: MotionSnapshot,
         state: inout ViewportState,
         workingFrame: CGRect,
-        gaps: CGFloat
+        gaps: CGFloat,
+        orientation: Monitor.Orientation
     ) -> NiriNode? {
         assertSanctionedMutation()
         return focusWindowAtNiriIndex(
@@ -482,7 +531,8 @@ extension NiriLayoutEngine {
             motion: motion,
             state: &state,
             workingFrame: workingFrame,
-            gaps: gaps
+            gaps: gaps,
+            orientation: orientation
         )
     }
 
@@ -492,7 +542,8 @@ extension NiriLayoutEngine {
         motion: MotionSnapshot,
         state: inout ViewportState,
         workingFrame: CGRect,
-        gaps: CGFloat
+        gaps: CGFloat,
+        orientation: Monitor.Orientation
     ) -> NiriNode? {
         assertSanctionedMutation()
         return focusWindowAtVisualIndex(
@@ -502,7 +553,8 @@ extension NiriLayoutEngine {
             motion: motion,
             state: &state,
             workingFrame: workingFrame,
-            gaps: gaps
+            gaps: gaps,
+            orientation: orientation
         )
     }
 
@@ -512,7 +564,8 @@ extension NiriLayoutEngine {
         motion: MotionSnapshot,
         state: inout ViewportState,
         workingFrame: CGRect,
-        gaps: CGFloat
+        gaps: CGFloat,
+        orientation: Monitor.Orientation
     ) -> NiriNode? {
         assertSanctionedMutation()
         return focusWindowAtVisualIndex(
@@ -522,7 +575,8 @@ extension NiriLayoutEngine {
             motion: motion,
             state: &state,
             workingFrame: workingFrame,
-            gaps: gaps
+            gaps: gaps,
+            orientation: orientation
         )
     }
 
@@ -532,7 +586,8 @@ extension NiriLayoutEngine {
         motion: MotionSnapshot,
         state: inout ViewportState,
         workingFrame: CGRect,
-        gaps: CGFloat
+        gaps: CGFloat,
+        orientation: Monitor.Orientation
     ) -> NiriNode? {
         assertSanctionedMutation()
         if let target = moveSelectionVertical(direction: .down, currentSelection: currentSelection) {
@@ -542,7 +597,8 @@ extension NiriLayoutEngine {
                 motion: motion,
                 state: &state,
                 workingFrame: workingFrame,
-                gaps: gaps
+                gaps: gaps,
+                orientation: orientation
             )
             return target
         }
@@ -553,7 +609,8 @@ extension NiriLayoutEngine {
             motion: motion,
             state: &state,
             workingFrame: workingFrame,
-            gaps: gaps
+            gaps: gaps,
+            orientation: orientation
         )
     }
 
@@ -563,7 +620,8 @@ extension NiriLayoutEngine {
         motion: MotionSnapshot,
         state: inout ViewportState,
         workingFrame: CGRect,
-        gaps: CGFloat
+        gaps: CGFloat,
+        orientation: Monitor.Orientation
     ) -> NiriNode? {
         assertSanctionedMutation()
         if let target = moveSelectionVertical(direction: .up, currentSelection: currentSelection) {
@@ -573,7 +631,8 @@ extension NiriLayoutEngine {
                 motion: motion,
                 state: &state,
                 workingFrame: workingFrame,
-                gaps: gaps
+                gaps: gaps,
+                orientation: orientation
             )
             return target
         }
@@ -584,7 +643,8 @@ extension NiriLayoutEngine {
             motion: motion,
             state: &state,
             workingFrame: workingFrame,
-            gaps: gaps
+            gaps: gaps,
+            orientation: orientation
         )
     }
 
@@ -595,7 +655,8 @@ extension NiriLayoutEngine {
         motion: MotionSnapshot,
         state: inout ViewportState,
         workingFrame: CGRect,
-        gaps: CGFloat
+        gaps: CGFloat,
+        orientation: Monitor.Orientation
     ) -> NiriNode? {
         let visualIndex = oneBasedWindowIndex <= 1 ? 0 : oneBasedWindowIndex - 1
         return focusWindowAtVisualIndex(
@@ -605,7 +666,8 @@ extension NiriLayoutEngine {
             motion: motion,
             state: &state,
             workingFrame: workingFrame,
-            gaps: gaps
+            gaps: gaps,
+            orientation: orientation
         )
     }
 
@@ -616,7 +678,8 @@ extension NiriLayoutEngine {
         motion: MotionSnapshot,
         state: inout ViewportState,
         workingFrame: CGRect,
-        gaps: CGFloat
+        gaps: CGFloat,
+        orientation: Monitor.Orientation
     ) -> NiriNode? {
         guard let currentColumn = column(of: currentSelection) else { return nil }
 
@@ -637,7 +700,8 @@ extension NiriLayoutEngine {
             motion: motion,
             state: &state,
             workingFrame: workingFrame,
-            gaps: gaps
+            gaps: gaps,
+            orientation: orientation
         )
         return target
     }
@@ -649,6 +713,7 @@ extension NiriLayoutEngine {
         state: inout ViewportState,
         workingFrame: CGRect,
         gaps: CGFloat,
+        orientation: Monitor.Orientation,
         limitToWorkspace: Bool = true
     ) -> NiriWindow? {
         assertSanctionedMutation()
@@ -668,7 +733,8 @@ extension NiriLayoutEngine {
             motion: motion,
             state: &state,
             workingFrame: workingFrame,
-            gaps: gaps
+            gaps: gaps,
+            orientation: orientation
         )
 
         return previousWindow

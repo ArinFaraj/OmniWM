@@ -109,9 +109,17 @@ final class DwindleGroupFocusIntegrationTests: XCTestCase {
         postLayout.runIfCurrent(using: fixture.controller.workspaceManager)
         XCTAssertEqual(frontedTokens, [neighbor])
 
+        let revealResult = frameResult(token: fixture.inactiveToken, frame: pendingReveal.frame)
+        fixture.controller.axManager.handleAcceptedFrameApplySuccess(revealResult)
+        XCTAssertTrue(
+            fixture.controller.axManager.pendingParkWindowIds.contains(fixture.inactiveToken.windowId)
+        )
         fixture.controller.dwindleLayoutHandler.completePendingGroupRevealTransaction(
-            with: frameResult(token: fixture.inactiveToken, frame: pendingReveal.frame),
+            with: revealResult,
             transactionId: pendingReveal.transactionId
+        )
+        XCTAssertFalse(
+            fixture.controller.axManager.pendingParkWindowIds.contains(fixture.inactiveToken.windowId)
         )
         XCTAssertEqual(frontedTokens, [neighbor, fixture.inactiveToken])
     }
@@ -1052,7 +1060,7 @@ final class DwindleGroupFocusIntegrationTests: XCTestCase {
             ),
             autosaveEnabled: false
         )
-        return WMController(
+        let controller = WMController(
             settings: settings,
             windowFocusOperations: WindowFocusOperations(
                 activateApp: { _ in },
@@ -1060,6 +1068,16 @@ final class DwindleGroupFocusIntegrationTests: XCTestCase {
                 raiseWindow: { _ in }
             )
         )
+        let monitor = Monitor(
+            id: .init(displayId: 97_000),
+            displayId: 97_000,
+            frame: CGRect(x: 0, y: 0, width: 1_200, height: 800),
+            visibleFrame: CGRect(x: 0, y: 0, width: 1_200, height: 800),
+            hasNotch: false,
+            name: "Dwindle Group Focus"
+        )
+        controller.workspaceManager.applyMonitorConfigurationChange([monitor])
+        return controller
     }
 
     private func addGroupedMember(to fixture: Fixture) -> WindowToken {
@@ -1095,7 +1113,7 @@ final class DwindleGroupFocusIntegrationTests: XCTestCase {
         let screen = fixture.controller.workspaceManager.monitor(for: fixture.workspaceId)?.visibleFrame
             ?? CGRect(x: 0, y: 0, width: 1200, height: 800)
         fixture.controller.workspaceManager.withEngineMutationScope {
-            XCTAssertTrue(fixture.engine.setPreselection(.up, in: fixture.workspaceId))
+            XCTAssertTrue(fixture.engine.setPreselection(.down, in: fixture.workspaceId))
             _ = fixture.engine.addWindow(
                 token: token,
                 to: fixture.workspaceId,
@@ -1121,7 +1139,7 @@ final class DwindleGroupFocusIntegrationTests: XCTestCase {
         let screen = fixture.controller.workspaceManager.monitor(for: fixture.workspaceId)?.visibleFrame
             ?? CGRect(x: 0, y: 0, width: 1200, height: 800)
         fixture.controller.workspaceManager.withEngineMutationScope {
-            XCTAssertTrue(fixture.engine.setPreselection(.down, in: fixture.workspaceId))
+            XCTAssertTrue(fixture.engine.setPreselection(.up, in: fixture.workspaceId))
             _ = fixture.engine.addWindow(
                 token: token,
                 to: fixture.workspaceId,
@@ -1229,6 +1247,10 @@ final class DwindleGroupFocusIntegrationTests: XCTestCase {
         AXFrameApplyResult(
             pid: token.pid,
             windowId: token.windowId,
+            expectedWindow: AXWindowRef(
+                element: AXUIElementCreateApplication(token.pid),
+                windowId: token.windowId
+            ),
             targetFrame: frame,
             currentFrameHint: nil,
             writeResult: AXFrameWriteResult(

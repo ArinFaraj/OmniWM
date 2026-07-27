@@ -34,13 +34,18 @@ extension AXEventHandler {
             .map { controller.settings.layoutType(for: $0.name) } ?? .defaultLayout
         let ownsLiveFocus = controller.workspaceManager.focusedToken == token
             || controller.workspaceManager.nonManagedFocusToken == token
+        let removesScratchpadResources = controller.workspaceManager.isScratchpadToken(token)
+            || controller.workspaceManager.hiddenState(for: token)?.isScratchpad == true
         let policy = retirementPolicy(for: reason)
 
         var oldFrames: [WindowToken: CGRect] = [:]
         var removedNodeId: NodeId?
+        var removedNiriColumn = false
         if layoutType != .dwindle, let engine = controller.niriEngine {
             oldFrames = engine.captureWindowFrames(in: workspaceId)
-            removedNodeId = engine.findNode(for: token, in: workspaceId)?.id
+            let node = engine.findNode(for: token, in: workspaceId)
+            removedNodeId = node?.id
+            removedNiriColumn = node.flatMap { engine.column(of: $0) }?.windowNodes.count == 1
         }
 
         clearTerminalFrameFailure(windowId: token.windowId)
@@ -50,10 +55,12 @@ extension AXEventHandler {
         cancelPostCreateLifecycleVerification(for: token)
         cancelSameAppCloseProbe(matchingFocusedToken: token, reason: policy.traceReason)
         clearManagedFocusState(matching: token, workspaceId: workspaceId)
-        controller.axManager.removeWindowState(pid: token.pid, windowId: token.windowId)
-        controller.cleanupScratchpadWindowResourcesIfNeeded(for: token)
-        controller.clearManualWindowOverride(for: token)
         _ = controller.workspaceManager.removeWindow(pid: token.pid, windowId: token.windowId)
+        controller.axManager.removeWindowState(pid: token.pid, expectedWindow: entry.axRef)
+        if removesScratchpadResources {
+            controller.cleanupScratchpadWindowResources(for: token)
+        }
+        controller.clearManualWindowOverride(for: token)
         if policy.removesIdentityAliases {
             identityAliasesByWindowId.removeValue(forKey: token.windowId)
         }
@@ -62,6 +69,7 @@ extension AXEventHandler {
             workspaceId: workspaceId,
             layoutType: layoutType,
             removedNodeId: removedNodeId,
+            removedNiriColumn: removedNiriColumn,
             niriOldFrames: oldFrames,
             shouldRecoverFocus: policy.shouldRecoverFocus,
             allowsPreferredRecoveryToken: policy.allowsPreferredRecoveryToken

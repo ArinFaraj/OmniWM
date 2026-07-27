@@ -33,6 +33,23 @@
       <sub>@siketyan</sub>
     </td>
     <td align="center" valign="top">
+      <a href="https://github.com/epam">
+        <img src="https://avatars.githubusercontent.com/u/1589802?v=4" width="72" alt="EPAM Systems">
+      </a>
+      <br>
+      <a href="https://github.com/epam"><strong>EPAM</strong></a>
+      <br>
+      <sub>━━━━━━━━</sub>
+      <br>
+      <a href="https://github.com/Guria" title="Aleksei Gurianov">
+        <img src="https://github.com/Guria.png?size=96" width="72" alt="Aleksei Gurianov">
+      </a>
+      <br>
+      <a href="https://github.com/Guria"><strong>Aleksei Gurianov</strong></a>
+      <br>
+      <sub>@Guria</sub>
+    </td>
+    <td align="center" valign="top">
       <a href="https://github.com/github">
         <img src="https://avatars.githubusercontent.com/u/9919?v=4" width="72" alt="GitHub">
       </a>
@@ -120,6 +137,83 @@
   </tr>
 </table>
 
+
+### 🎓 By Education
+
+<table align="center">
+  <tr>
+    <td align="center" valign="top">
+      <a href="https://www.au.edu/">
+        <img src="https://www.google.com/s2/favicons?domain=www.au.edu&sz=96" width="72" alt="Assumption University of Thailand">
+      </a>
+      <br>
+      <a href="https://www.au.edu/"><strong>Assumption University of Thailand</strong></a>
+      <br>
+      <sub>━━━━━━━━</sub>
+      <br>
+      <a href="https://github.com/t1dotdev" title="Panuphong Burakitphachai">
+        <img src="https://github.com/t1dotdev.png?size=96" width="72" alt="Panuphong Burakitphachai">
+      </a>
+      <br>
+      <a href="https://github.com/t1dotdev"><strong>Panuphong Burakitphachai</strong></a>
+      <br>
+      <sub>@t1dotdev</sub>
+    </td>
+    <td align="center" valign="top">
+      <a href="https://lnu.se/en/">
+        <img src="https://www.google.com/s2/favicons?domain=lnu.se&sz=96" width="72" alt="Linnaeus University">
+      </a>
+      <br>
+      <a href="https://lnu.se/en/"><strong>Linnaeus University</strong></a>
+      <br>
+      <sub>━━━━━━━━</sub>
+      <br>
+      <a href="https://github.com/balazshevesi" title="Balazs Hevesi">
+        <img src="https://github.com/balazshevesi.png?size=96" width="72" alt="Balazs Hevesi">
+      </a>
+      <br>
+      <a href="https://github.com/balazshevesi"><strong>Balazs Hevesi</strong></a>
+      <br>
+      <sub>@balazshevesi</sub>
+    </td>
+    <td align="center" valign="top">
+      <a href="https://www.ntu.edu.sg/">
+        <img src="https://www.google.com/s2/favicons?domain=www.ntu.edu.sg&sz=96" width="72" alt="NTU Singapore">
+      </a>
+      <br>
+      <a href="https://www.ntu.edu.sg/"><strong>NTU Singapore</strong></a>
+      <br>
+      <sub>━━━━━━━━</sub>
+      <br>
+      <a href="https://github.com/holmns" title="Nawat Suangburanakul">
+        <img src="https://github.com/holmns.png?size=96" width="72" alt="Nawat Suangburanakul">
+      </a>
+      <br>
+      <a href="https://github.com/holmns"><strong>Nawat Suangburanakul</strong></a>
+      <br>
+      <sub>@holmns</sub>
+    </td>
+    <td align="center" valign="top">
+      <a href="https://www.sustech.edu.cn/en/">
+        <img src="https://www.google.com/s2/favicons?domain=www.sustech.edu.cn&sz=96" width="72" alt="SUSTech">
+      </a>
+      <br>
+      <a href="https://www.sustech.edu.cn/en/"><strong>SUSTech</strong></a>
+      <br>
+      <sub>━━━━━━━━</sub>
+      <br>
+      <a href="https://github.com/Yang-Yiming" title="Yang-Yiming">
+        <img src="https://github.com/Yang-Yiming.png?size=96" width="72" alt="Yang-Yiming">
+      </a>
+      <br>
+      <a href="https://github.com/Yang-Yiming"><strong>Yang-Yiming</strong></a>
+      <br>
+      <sub>@Yang-Yiming</sub>
+    </td>
+  </tr>
+</table>
+
+
 ### ✨ All Contributors
 
 <table align="center">
@@ -130,6 +224,9 @@
       </a>
       <a href="https://github.com/albertilagan" title="Albert Ilagan">
         <img src="https://github.com/albertilagan.png?size=96" width="72" alt="Albert Ilagan">
+      </a>
+      <a href="https://github.com/Guria" title="Aleksei Gurianov">
+        <img src="https://github.com/Guria.png?size=96" width="72" alt="Aleksei Gurianov">
       </a>
       <a href="https://github.com/gloomy-breaker" title="Ayaan Sandhu">
         <img src="https://github.com/gloomy-breaker.png?size=96" width="72" alt="Ayaan Sandhu">
@@ -142,6 +239,9 @@
       </a>
       <a href="https://github.com/nekonora" title="Filippo Zaffoni">
         <img src="https://github.com/nekonora.png?size=96" width="72" alt="Filippo Zaffoni">
+      </a>
+      <a href="https://github.com/henry-p" title="Henry Perschk">
+        <img src="https://github.com/henry-p.png?size=96" width="72" alt="Henry Perschk">
       </a>
       <a href="https://github.com/janhesters" title="Jan Hesters">
         <img src="https://github.com/janhesters.png?size=96" width="72" alt="Jan Hesters">
@@ -167,8 +267,17 @@
       <a href="https://github.com/siketyan" title="Naoki Ikeguchi">
         <img src="https://github.com/siketyan.png?size=96" width="72" alt="Naoki Ikeguchi">
       </a>
+      <a href="https://github.com/holmns" title="Nawat Suangburanakul">
+        <img src="https://github.com/holmns.png?size=96" width="72" alt="Nawat Suangburanakul">
+      </a>
+      <a href="https://github.com/t1dotdev" title="Panuphong Burakitphachai">
+        <img src="https://github.com/t1dotdev.png?size=96" width="72" alt="Panuphong Burakitphachai">
+      </a>
       <a href="https://github.com/georgebastille" title="Rich Hanes">
         <img src="https://github.com/georgebastille.png?size=96" width="72" alt="Rich Hanes">
+      </a>
+      <a href="https://github.com/1Pio" title="rPio">
+        <img src="https://github.com/1Pio.png?size=96" width="72" alt="rPio">
       </a>
       <a href="https://github.com/RyanHecht" title="Ryan Hecht">
         <img src="https://github.com/RyanHecht.png?size=96" width="72" alt="Ryan Hecht">
@@ -247,6 +356,34 @@ brew tap BarutSRB/tap
 brew install omniwm
 ```
 
+### Nix
+
+OmniWM supports both community-maintained Nix packages below. They install official OmniWM release
+artifacts, while their Nix expressions are maintained by DoomHammer and DavSanchez respectively.
+
+| Package | Best for | Packaging difference |
+| --- | --- | --- |
+| [DoomHammer NUR package](https://nur.nix-community.org/repos/doomhammer/) | Fast release tracking | Its current `unzip` extraction does not preserve the release's valid Developer ID signature, and it installs the app bundle without exposing `omniwmctl` on `PATH`. |
+| [DavSanchez package](https://github.com/DavSanchez/nix-dotfiles/blob/master/pkgs/omniwm.nix) and [Home Manager module](https://github.com/DavSanchez/nix-dotfiles/blob/master/modules/home/omniwm.nix) | Signature-preserving, declarative integration | It may trail the latest release, but its `bsdtar` extraction preserves code signing and it provides `omniwmctl`, Home Manager settings, and launchd integration. |
+
+Install the fast-tracking DoomHammer package directly:
+
+```bash
+nix profile install github:DoomHammer/nur-packages#omniwm
+```
+
+Existing NUR configurations can use `nur.repos.doomhammer.omniwm`.
+
+Install the signature-preserving DavSanchez package directly:
+
+```bash
+nix profile install github:DavSanchez/nix-dotfiles#omniwm
+```
+
+For a declarative setup, use DavSanchez's exported
+[`homeModules.omniwm`](https://github.com/DavSanchez/nix-dotfiles/blob/master/modules/home/omniwm.nix)
+and `overlays.additions`. After either installation, complete the macOS setup in steps 3-6 below.
+
 ### GitHub Releases
 
 1. Download the latest `OmniWM.zip` from [Releases](https://github.com/BarutSRB/OmniWM/releases)
@@ -298,6 +435,16 @@ For setup, installation options, commands, queries, rules, subscriptions, and se
 
 
 ## User Guide
+
+### Multi-Monitor Setup
+
+OmniWM uses two display maps for different jobs:
+
+1. Open **System Settings > Displays > Arrange**. Put the physically largest or widest display at the bottom. Place the next smaller display above and to its right so its bottom-left corner touches the lower display's top-right corner. Continue the same staircase for every additional display. This macOS map is a technical arrangement used for actual window placement; it does not need to look like your desk.
+2. Open **OmniWM Settings > Monitors** and arrange the OmniWM routing map to match where the displays really sit on your desk. Keep every display connected by a left, right, up, or down edge; diagonal-only displays cannot exchange directional focus, window moves, or mouse warp.
+3. Leave **Mouse Warp** turned on for the recommended experience. It lets the pointer cross between displays according to the real-desk OmniWM map even though macOS uses the staircase.
+
+The setup assistant opens automatically when OmniWM first sees multiple displays. To review or redo it later, choose **Run Monitor Setup…** in **Settings > Monitors**. The assistant's **Show Numbers on Screens** action helps match each physical display to its tile.
 
 ### Layout Modes
 
@@ -366,6 +513,9 @@ Layout legend:
 | Focus Next Monitor | `Control + Command + Tab` | `Shared` |
 | Focus Previous Monitor | `Unassigned` | `Shared` |
 | Focus Last Monitor | `` Control + Command + ` `` | `Shared` |
+| Move Workspace to Left / Right / Up / Down Monitor | `Unassigned` | `Shared` |
+
+The workspace-to-monitor actions target the active workspace and intentionally use the same temporary runtime override as `omniwmctl workspace move-to-monitor --force`. They do not rewrite the workspace's Home Monitor or swap workspaces, and unsafe fullscreen, hidden-app, scratchpad, or focus states still block the move.
 
 #### Layout
 
@@ -374,6 +524,8 @@ Layout legend:
 | Toggle Fullscreen | `Option + Return` | `Shared` |
 | Toggle Native Fullscreen | `Unassigned` | `Shared` |
 | Balance Sizes | `Option + Shift + B` | `Shared` |
+| Cycle Size Forward | `Option + .` | `Shared` |
+| Cycle Size Backward | `Option + ,` | `Shared` |
 | Move to Root | `Unassigned` | `Dwindle` |
 | Toggle Split | `Unassigned` | `Dwindle` |
 | Swap Split | `Unassigned` | `Dwindle` |
@@ -395,9 +547,7 @@ Layout legend:
 | Move Container Left / Right | `Control + Option + Shift + Left / Right Arrow` | `Shared` |
 | Move Container Up / Down | `Unassigned` | `Dwindle` |
 | Toggle Column Tabbed | `Option + T` | `Niri` |
-| Cycle Column Width Forward | `Option + .` | `Shared` |
-| Cycle Column Width Backward | `Option + ,` | `Shared` |
-| Toggle Column Full Width | `Option + Shift + F` | `Niri` |
+| Toggle Container Full Primary Span | `Option + Shift + F` | `Niri` |
 
 The daily `Focus` and `Move` shortcuts adapt to the active layout. In Niri, `Move Left / Right` expels the focused window from a multi-window column or consumes a single-window column into its neighbor, while `Move Up / Down` reorders within the column.
 
@@ -444,7 +594,8 @@ A true quake/sticky terminal (powered by Ghostty's libghostty) that slides in fr
 - Supports multiple tabs and splits within tabs
 - Tab and pane shortcuts are listed in **Quake Terminal (Inside Terminal)**
 - Mouse resize by dragging edges; `Option + drag` to move (remembers size/position per monitor)
-- Configure position (top/bottom/left/right/center), size, and opacity in Settings
+- Configure position (top/bottom/left/right/center), size, opacity, and background effect in Settings
+- Choose Standard Blur with an adjustable radius or native Regular Glass/Clear Glass; switching effects preserves the saved Standard Blur radius
 - Auto-hides on focus loss (optional)
 
 #### Command Palette
@@ -490,6 +641,17 @@ A visual indicator showing your workspaces:
 - Click to switch workspaces or jump to that app
 - If dedupe option is on click the app icon to get a popup with list of all its windows to jump to
 - Configure position, height, and appearance in Settings
+- Exclude individual apps or choose alternate app icons across all monitors in Settings
+
+Workspace-bar icon overrides can also be configured in `settings.toml`. Quote bundle IDs so TOML treats each dotted identifier as one key:
+
+```toml
+[workspaceBar.iconOverrides]
+"com.example.App" = "icons/custom.icns"
+"com.cmuxterm.app" = "bundle-resource:AppIconDark"
+```
+
+`bundle-resource:` loads a named image packaged inside the selected app. The Settings picker discovers likely app-icon resources on demand; runtime-generated or downloaded Dock icons may not be available. Absolute paths are used as written, `~` expands to your home directory, and relative paths are resolved from the directory containing `settings.toml`. Overrides affect only the workspace bar. A valid override takes precedence over the app's standard icon; an unavailable or invalid image falls back to the standard icon, then the dashed placeholder when no app icon is available. OmniWM does not watch image files; use Replace to reload a file changed in place.
 
 #### Hidden Bar
 
@@ -527,18 +689,19 @@ Configure per-application behavior in Settings > App Rules:
 
 - **Always Float** - Force specific apps to always float (e.g., calculators, preferences windows)
 - **Assign to Workspace** - Open first matching app windows on a specific workspace; later windows follow the app's current workspace unless rules are explicitly applied
-- **Initial Column Width (Niri)** - Start matching resizable windows at 5–100% when they create or claim a new column; the column remains freely resizable afterward
+- **Initial Container Primary Span (Niri)** - Start matching resizable windows at 5–100% when they create or claim a new container; the container remains freely resizable afterward
 - **Minimum Size** - Prevent the layout engine from sizing windows below a threshold
 
-Initial column width is a one-time seed. Niri's Single Window Fit still takes visual precedence for a lone
-window, and minimum width can clamp the resolved pixel size without changing the stored initial proportion.
+Initial container primary span is a one-time seed. It controls width in horizontal orientation and height in
+vertical orientation. Niri's Single Window Fit still takes visual precedence for a lone window, and physical
+minimum-size constraints can clamp the resolved pixel size without changing the stored initial proportion.
 
 The equivalent TOML rule uses a proportion:
 
 ```toml
 [[appRules]]
 bundleId = "net.kovidgoyal.kitty"
-initialColumnWidth = 0.5
+initialContainerPrimarySpan = 0.5
 ```
 
 ## Building from Source

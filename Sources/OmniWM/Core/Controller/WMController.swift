@@ -109,6 +109,9 @@ final class WMController {
     private var textureCacheSyncTimer: Timer?
     let traceCaptureCoordinator: RuntimeTraceCaptureCoordinator
     let appInfoCache = AppInfoCache()
+    @ObservationIgnored
+    let workspaceBarIconResolver: WorkspaceBarIconResolver
+    private(set) var workspaceBarIconResolutionRevision: UInt64 = 0
     let eventIntake = EventIntake()
     let factResolver = FactResolver()
     let intentLedger = IntentLedger()
@@ -269,9 +272,12 @@ final class WMController {
         clipboardHistoryDirectory: URL = OmniWMStoragePaths.live.stateDirectory,
         diagnosticsDirectory: URL = OmniWMStoragePaths.live.diagnosticsDirectory,
         windowFocusOperations: WindowFocusOperations = .live,
-        ownedWindowRegistry: OwnedWindowRegistry = .shared
+        ownedWindowRegistry: OwnedWindowRegistry = .shared,
+        workspaceBarIconResolver: WorkspaceBarIconResolver? = nil
     ) {
         self.settings = settings
+        self.workspaceBarIconResolver = workspaceBarIconResolver
+            ?? WorkspaceBarIconResolver(settingsFileURL: settings.settingsFileURL)
         motionPolicy = MotionPolicy(animationsEnabled: settings.animationsEnabled)
         self.hiddenBarController = hiddenBarController ?? HiddenBarController(settings: settings)
         self.clipboardHistoryDirectory = clipboardHistoryDirectory
@@ -281,6 +287,11 @@ final class WMController {
         self.ownedWindowRegistry = ownedWindowRegistry
         workspaceManager = WorkspaceManager(settings: settings)
         focusPolicyEngine = FocusPolicyEngine()
+        if self.workspaceBarIconResolver.synchronize(
+            overrides: settings.workspaceBarIconOverrides
+        ) {
+            workspaceBarIconResolutionRevision = 1
+        }
         axManager.isWindowParked = { [workspaceManager] windowId in
             workspaceManager.entry(forWindowId: windowId)?.hiddenState != nil
         }
@@ -323,6 +334,9 @@ final class WMController {
         workspaceManager.onWindowRemoved = { [weak self] entry in
             self?.windowActionHandlerStorage?.handleOverviewWindowRemoved(entry)
         }
+        workspaceManager.onDeferredWorkspaceMonitorMove = { [weak self] outcome in
+            self?.layoutRefreshController.commitWorkspaceMonitorTransition(outcome)
+        }
         focusPolicyEngine.onLeaseChanged = { [weak self] lease in
             self?.workspaceManager.recordReconcileEvent(
                 .focusLeaseChanged(
@@ -359,12 +373,13 @@ final class WMController {
         updateHotkeyBindings(settings.hotkeyBindings)
         setHotkeysEnabled(settings.hotkeysEnabled)
 
-        setGapSize(settings.gapSize)
+        setGapSize(settings.gapSize, publishChange: false)
         setOuterGaps(
             left: settings.outerGapLeft,
             right: settings.outerGapRight,
             top: settings.outerGapTop,
-            bottom: settings.outerGapBottom
+            bottom: settings.outerGapBottom,
+            publishChange: false
         )
 
         if niriEngine == nil {
@@ -374,13 +389,13 @@ final class WMController {
             )
         }
         updateNiriConfig(
-            maxVisibleColumns: settings.niriMaxVisibleColumns,
+            visibleContainerCount: settings.niriVisibleContainerCount,
             infiniteLoop: settings.niriInfiniteLoop,
             centerFocusedColumn: settings.niriCenterFocusedColumn,
             alwaysCenterSingleColumn: settings.niriAlwaysCenterSingleColumn,
             singleWindowFit: settings.niriSingleWindowFit,
-            columnWidthPresets: settings.niriColumnWidthPresets,
-            defaultColumnWidth: settings.niriDefaultColumnWidth
+            containerPrimarySpanPresets: settings.niriContainerPrimarySpanPresets,
+            defaultContainerPrimarySpan: settings.niriDefaultContainerPrimarySpan
         )
 
         if dwindleEngine == nil {
@@ -417,6 +432,7 @@ final class WMController {
         // an app relaunch.
         quakeTerminalController.applyGeometryToVisibleWindow()
         quakeTerminalController.reloadOpacityConfig()
+        quakeTerminalController.reloadBackgroundBlur()
         updateWorkspaceBarSettings()
         updateHiddenBarSettings()
         _ = syncMouseWarpPolicy()
@@ -527,12 +543,24 @@ final class WMController {
         refreshHotkeyFailureSnapshots()
     }
 
-    func setGapSize(_ size: Double) {
+    func setGapSize(_ size: Double, publishChange: Bool = true) {
         workspaceManager.setGaps(to: size)
+        if publishChange {
+            publishDisplayChanged()
+        }
     }
 
-    func setOuterGaps(left: Double, right: Double, top: Double, bottom: Double) {
+    func setOuterGaps(
+        left: Double,
+        right: Double,
+        top: Double,
+        bottom: Double,
+        publishChange: Bool = true
+    ) {
         workspaceManager.setOuterGaps(left: left, right: right, top: top, bottom: bottom)
+        if publishChange {
+            publishDisplayChanged()
+        }
     }
 
     func borderSettingsChanged() {
@@ -660,6 +688,14 @@ final class WMController {
         quakeTerminalController.reloadOpacityConfig()
     }
 
+    func reloadQuakeTerminalBackgroundEffect() {
+        quakeTerminalController.reloadOpacityConfig()
+    }
+
+    func reloadQuakeTerminalBackgroundBlur() {
+        quakeTerminalController.reloadBackgroundBlur()
+    }
+
     func requestWorkspaceBarRefresh() {
         surfaceReconciler.noteWorldChanged()
     }
@@ -707,7 +743,10 @@ final class WMController {
         )
     }
 
-    func updateWorkspaceBarSettings() {
+    func updateWorkspaceBarSettings(forceIconReload: Bool = false) {
+        synchronizeWorkspaceBarIconOverrides(
+            forceReload: forceIconReload
+        )
         pruneHiddenWorkspaceBarMonitorIds()
         layoutRefreshController.requestRelayout(reason: .monitorSettingsChanged)
         surfaceReconciler.noteWorldChanged()
@@ -715,8 +754,50 @@ final class WMController {
         hiddenBarController.dismissPanel()
     }
 
+    func updateWorkspaceBarIconOverride(bundleId: String, forceReload: Bool) {
+        guard synchronizeWorkspaceBarIconOverrides(
+            forceReloadBundleId: forceReload ? bundleId : nil
+        ) else {
+            return
+        }
+        surfaceReconciler.noteWorldChanged()
+    }
+
+    func refreshUnavailableWorkspaceBarIconOverride(bundleId: String?) {
+        guard let bundleId,
+              let resolution = workspaceBarIconResolver.overrideResolution(for: bundleId),
+              resolution.image == nil,
+              case .bundleResource = resolution.source
+        else {
+            return
+        }
+
+        guard synchronizeWorkspaceBarIconOverrides(
+            forceReloadBundleId: bundleId
+        ) else {
+            return
+        }
+        surfaceReconciler.noteWorldChanged()
+    }
+
     func updateWorkspaceBarAppearance() {
         workspaceBarManager.updateAppearance()
+    }
+
+    @discardableResult
+    private func synchronizeWorkspaceBarIconOverrides(
+        forceReload: Bool = false,
+        forceReloadBundleId: String? = nil
+    ) -> Bool {
+        guard workspaceBarIconResolver.synchronize(
+            overrides: settings.workspaceBarIconOverrides,
+            forceReload: forceReload,
+            forceReloadBundleId: forceReloadBundleId
+        ) else {
+            return false
+        }
+        workspaceBarIconResolutionRevision += 1
+        return true
     }
 
     func updateMonitorOrientations() {
@@ -749,6 +830,14 @@ final class WMController {
 
     func updateMonitorGapSettings() {
         layoutRefreshController.requestRelayout(reason: .monitorSettingsChanged)
+        publishDisplayChanged()
+    }
+
+    private func publishDisplayChanged() {
+        guard let ipcApplicationBridge else { return }
+        Task {
+            await ipcApplicationBridge.publishEvent(.displayChanged)
+        }
     }
 
     func workspaceBarItems(
@@ -760,6 +849,7 @@ final class WMController {
             options: options,
             workspaceManager: workspaceManager,
             appInfoCache: appInfoCache,
+            iconResolver: workspaceBarIconResolver,
             focusedToken: workspaceManager.focusedToken,
             settings: settings
         )
@@ -774,13 +864,14 @@ final class WMController {
             options: options,
             workspaceManager: workspaceManager,
             appInfoCache: appInfoCache,
+            iconResolver: workspaceBarIconResolver,
             focusedToken: workspaceManager.focusedToken,
             settings: settings
         )
     }
 
-    func focusWorkspaceFromBar(named name: String) {
-        windowActionHandler.focusWorkspaceFromBar(named: name)
+    func focusWorkspaceFromBar(id workspaceId: WorkspaceDescriptor.ID) {
+        windowActionHandler.focusWorkspaceFromBar(id: workspaceId)
     }
 
     func focusWindowFromBar(token: WindowToken) {
@@ -918,6 +1009,20 @@ final class WMController {
         mouseWarpHandler.resetTransientState()
     }
 
+    func innerGap(for monitor: Monitor) -> CGFloat {
+        guard settings.gapSettings(for: monitor)?.innerGap != nil else {
+            return CGFloat(workspaceManager.gaps)
+        }
+        return settings.resolvedGapSettings(for: monitor).innerGap
+    }
+
+    func innerGap(for workspaceId: WorkspaceDescriptor.ID) -> CGFloat {
+        guard let monitor = workspaceManager.monitor(for: workspaceId) else {
+            return CGFloat(workspaceManager.gaps)
+        }
+        return innerGap(for: monitor)
+    }
+
     func insetWorkingFrame(for monitor: Monitor) -> CGRect {
         let scale = NSScreen.screens.first(where: { $0.displayId == monitor.displayId })?.backingScaleFactor ?? 2.0
         let reservedTopInset = workspaceBarReservedTopInset(for: monitor)
@@ -959,6 +1064,7 @@ final class WMController {
             force: force
         )
         refreshHotkeyFailureSnapshots()
+        refreshDiagnosticsIssues()
     }
 
     private func refreshHotkeyFailureSnapshots() {
@@ -1038,22 +1144,22 @@ final class WMController {
     }
 
     func updateNiriConfig(
-        maxVisibleColumns: Int? = nil,
+        visibleContainerCount: Int? = nil,
         infiniteLoop: Bool? = nil,
         centerFocusedColumn: CenterFocusedColumn? = nil,
         alwaysCenterSingleColumn: Bool? = nil,
         singleWindowFit: SingleWindowFit? = nil,
-        columnWidthPresets: [Double]? = nil,
-        defaultColumnWidth: Double?? = nil
+        containerPrimarySpanPresets: [Double]? = nil,
+        defaultContainerPrimarySpan: Double?? = nil
     ) {
         niriLayoutHandler.updateNiriConfig(
-            maxVisibleColumns: maxVisibleColumns,
+            visibleContainerCount: visibleContainerCount,
             infiniteLoop: infiniteLoop,
             centerFocusedColumn: centerFocusedColumn,
             alwaysCenterSingleColumn: alwaysCenterSingleColumn,
             singleWindowFit: singleWindowFit,
-            columnWidthPresets: columnWidthPresets,
-            defaultColumnWidth: defaultColumnWidth
+            containerPrimarySpanPresets: containerPrimarySpanPresets,
+            defaultContainerPrimarySpan: defaultContainerPrimarySpan
         )
     }
 
@@ -1646,7 +1752,9 @@ final class WMController {
             preferredMonitor: monitor
         ) {
             axManager.forceApplyNextFrame(for: entry.windowId)
-            axManager.applyFramesParallel([(entry.pid, entry.windowId, frame)])
+            axManager.applyFramesParallel([
+                .init(pid: entry.pid, window: entry.axRef, frame: frame)
+            ])
         }
 
         focusWindow(entry.token)
@@ -1695,7 +1803,9 @@ final class WMController {
                     )
                 {
                     axManager.forceApplyNextFrame(for: entry.windowId)
-                    axManager.applyFramesParallel([(entry.pid, entry.windowId, targetFrame)])
+                    axManager.applyFramesParallel([
+                        .init(pid: entry.pid, window: entry.axRef, frame: targetFrame)
+                    ])
                 }
             }
             return true
@@ -1734,13 +1844,18 @@ final class WMController {
         return nil
     }
 
-    func shouldDeferTilingAdmission(
+    func shouldDeferAdmission(
         evaluation: WindowDecisionEvaluation,
         axRef: AXWindowRef,
+        mode: TrackedWindowMode,
         windowInfo: WindowServerInfo?
     ) -> Bool {
         if let admissionGeometry = evaluation.admissionGeometry {
-            guard admissionGeometry.isSizeSettable else { return true }
+            if mode == .tiling,
+               !admissionGeometry.isSizeSettable
+            {
+                return true
+            }
             guard let frame = evaluation.facts.windowServer?.frame
                 ?? windowInfo?.frame
                 ?? admissionGeometry.frame
@@ -1749,7 +1864,11 @@ final class WMController {
             }
             return !Self.isMeaningfulAdmissionFrame(frame)
         }
-        guard AXWindowService.isSizeSettable(axRef) else { return true }
+        if mode == .tiling,
+           !AXWindowService.isSizeSettable(axRef)
+        {
+            return true
+        }
         if let frame = evaluation.facts.windowServer?.frame ?? windowInfo?.frame,
            Self.isMeaningfulAdmissionFrame(frame)
         {
@@ -2070,7 +2189,7 @@ final class WMController {
             workspaceName: evaluation.decision.workspaceName,
             minWidth: evaluation.decision.ruleEffects.minWidth,
             minHeight: evaluation.decision.ruleEffects.minHeight,
-            initialNiriColumnWidth: evaluation.decision.admissionHints.initialNiriColumnWidth,
+            initialNiriContainerPrimarySpan: evaluation.decision.admissionHints.initialNiriContainerPrimarySpan,
             matchedRuleId: evaluation.decision.ruleEffects.matchedRuleId,
             heuristicReasons: evaluation.decision.heuristicReasons,
             attributeFetchSucceeded: evaluation.facts.ax.attributeFetchSucceeded
@@ -2214,8 +2333,13 @@ final class WMController {
                 axEventHandler.cancelTrackedTilingPromotionRetry(windowId: token.windowId)
                 if let existingEntry {
                     affectedWorkspaceIds.insert(existingEntry.workspaceId)
-                    cleanupScratchpadWindowResourcesIfNeeded(for: token)
+                    let removesScratchpadResources = workspaceManager.isScratchpadToken(token)
+                        || workspaceManager.hiddenState(for: token)?.isScratchpad == true
                     _ = workspaceManager.removeWindow(pid: token.pid, windowId: token.windowId)
+                    axManager.removeWindowState(pid: token.pid, expectedWindow: existingEntry.axRef)
+                    if removesScratchpadResources {
+                        cleanupScratchpadWindowResources(for: token)
+                    }
                     relayoutNeeded = true
                 } else if evaluation.decision.disposition != .undecided {
                     axEventHandler.discardCreatePlacementContext(for: token.windowId)
@@ -2226,15 +2350,13 @@ final class WMController {
                 axEventHandler.cancelTrackedTilingPromotionRetry(windowId: token.windowId)
             }
 
-            if effectiveTrackedMode == .tiling,
-               axEventHandler.deferTilingAdmissionIfNeeded(
-                   evaluation: evaluation,
-                   axRef: axRef,
-                   pid: token.pid,
-                   windowId: token.windowId,
-                   existingEntry: existingEntry
-               )
-            {
+            if axEventHandler.deferAdmissionIfNeeded(
+                evaluation: evaluation,
+                axRef: axRef,
+                token: token,
+                mode: effectiveTrackedMode,
+                existingEntry: existingEntry
+            ) {
                 continue
             }
 
@@ -2391,6 +2513,11 @@ final class WMController {
             }
         }
 
+        let evaluatedPIDs = Set(tokensToReevaluate.map(\.pid))
+        axManager.bindManagedWindows(
+            workspaceManager.allEntries().filter { evaluatedPIDs.contains($0.pid) }
+        )
+
         if relayoutNeeded {
             layoutRefreshController.requestRelayout(
                 reason: .windowRuleReevaluation,
@@ -2494,8 +2621,13 @@ final class WMController {
             existingEntry: entry
         ) else {
             axEventHandler.cancelTrackedTilingPromotionRetry(windowId: token.windowId)
-            cleanupScratchpadWindowResourcesIfNeeded(for: token)
+            let removesScratchpadResources = workspaceManager.isScratchpadToken(token)
+                || workspaceManager.hiddenState(for: token)?.isScratchpad == true
             _ = workspaceManager.removeWindow(pid: token.pid, windowId: token.windowId)
+            axManager.removeWindowState(pid: token.pid, expectedWindow: entry.axRef)
+            if removesScratchpadResources {
+                cleanupScratchpadWindowResources(for: token)
+            }
             layoutRefreshController.requestRelayout(
                 reason: .windowRuleReevaluation,
                 affectedWorkspaceIds: [entry.workspaceId]
@@ -2506,15 +2638,13 @@ final class WMController {
             axEventHandler.cancelTrackedTilingPromotionRetry(windowId: token.windowId)
         }
 
-        if trackedMode == .tiling,
-           axEventHandler.deferTilingAdmissionIfNeeded(
-               evaluation: evaluation,
-               axRef: entry.axRef,
-               pid: token.pid,
-               windowId: token.windowId,
-               existingEntry: entry
-           )
-        {
+        if axEventHandler.deferAdmissionIfNeeded(
+            evaluation: evaluation,
+            axRef: entry.axRef,
+            token: token,
+            mode: trackedMode,
+            existingEntry: entry
+        ) {
             return
         }
 
@@ -2714,7 +2844,7 @@ final class WMController {
         }
 
         let rescuePlan = restorePlanner.planFloatingRescue(candidates)
-        var frameUpdates: [(pid: pid_t, windowId: Int, frame: CGRect)] = []
+        var frameUpdates: [AXFrameApplicationTarget] = []
         var visibleJobs: [(pid: pid_t, windowId: Int)] = []
         var rescuedEntries: [WindowState] = []
 
@@ -2736,7 +2866,9 @@ final class WMController {
                 axManager.markWindowActive(operation.windowId)
             }
             axManager.forceApplyNextFrame(for: operation.windowId)
-            frameUpdates.append((operation.pid, operation.windowId, operation.targetFrame))
+            frameUpdates.append(
+                .init(pid: entry.pid, window: entry.axRef, frame: operation.targetFrame)
+            )
             rescuedEntries.append(entry)
         }
 

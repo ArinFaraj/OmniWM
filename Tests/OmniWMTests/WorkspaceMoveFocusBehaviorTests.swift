@@ -113,6 +113,47 @@ final class WorkspaceMoveFocusBehaviorTests: XCTestCase {
         }
     }
 
+    func testNiriAdjacentWindowMoveUpHonorsFollowSetting() throws {
+        for followsFocus in [false, true] {
+            let fixture = try makeFixture(layouts: [.niri, .niri], followsFocus: followsFocus)
+            let sourceWorkspaceId = try XCTUnwrap(fixture.workspaceIds.last)
+            let destinationWorkspaceId = try XCTUnwrap(fixture.workspaceIds.first)
+            XCTAssertNotEqual(sourceWorkspaceId, destinationWorkspaceId)
+            XCTAssertTrue(
+                fixture.controller.workspaceManager.setActiveWorkspace(
+                    sourceWorkspaceId,
+                    on: fixture.monitor.id
+                )
+            )
+            let moved = try addManagedWindow(
+                pid: 488_004,
+                windowId: followsFocus ? 62 : 61,
+                to: sourceWorkspaceId,
+                fixture: fixture
+            )
+            try select(moved, in: sourceWorkspaceId, fixture: fixture)
+
+            try withBlockedLayoutRefreshes(fixture) {
+                fixture.controller.workspaceNavigationHandler.moveWindowToAdjacentWorkspace(direction: .up)
+
+                XCTAssertTrue(fixture.controller.workspaceManager.entries(in: sourceWorkspaceId).isEmpty)
+                XCTAssertEqual(
+                    fixture.controller.workspaceManager.workspace(for: moved.id),
+                    destinationWorkspaceId
+                )
+                XCTAssertEqual(
+                    fixture.controller.workspaceManager.lastFocusedToken(in: destinationWorkspaceId),
+                    moved.id
+                )
+                try assertCompletion(
+                    fixture,
+                    activeWorkspaceId: followsFocus ? destinationWorkspaceId : sourceWorkspaceId,
+                    expectedFocusToken: followsFocus ? moved.id : nil
+                )
+            }
+        }
+    }
+
     func testNiriAdjacentColumnMoveHonorsFollowSetting() throws {
         for followsFocus in [false, true] {
             let fixture = try makeFixture(layouts: [.niri], followsFocus: followsFocus)
@@ -171,6 +212,201 @@ final class WorkspaceMoveFocusBehaviorTests: XCTestCase {
                 )
             }
         }
+    }
+
+    func testNiriIndexedWindowMoveRefocusesRemainingSourceWindowAfterLayout() throws {
+        let fixture = try makeFixture(layouts: [.niri, .niri], followsFocus: false)
+        let sourceWorkspaceId = fixture.workspaceIds[0]
+        let destinationWorkspaceId = fixture.workspaceIds[1]
+        let fallback = try addManagedWindow(
+            pid: 488_005,
+            windowId: 71,
+            to: sourceWorkspaceId,
+            fixture: fixture
+        )
+        let moved = try addManagedWindow(
+            pid: 488_005,
+            windowId: 72,
+            to: sourceWorkspaceId,
+            fixture: fixture
+        )
+        try select(moved, in: sourceWorkspaceId, fixture: fixture)
+
+        try withBlockedLayoutRefreshes(fixture) {
+            fixture.controller.workspaceNavigationHandler.moveFocusedWindow(toWorkspaceIndex: 1)
+
+            XCTAssertEqual(
+                fixture.controller.workspaceManager.workspace(for: fallback.id),
+                sourceWorkspaceId
+            )
+            XCTAssertEqual(
+                fixture.controller.workspaceManager.workspace(for: moved.id),
+                destinationWorkspaceId
+            )
+            try assertCompletion(
+                fixture,
+                activeWorkspaceId: sourceWorkspaceId,
+                expectedFocusToken: fallback.id
+            )
+        }
+    }
+
+    func testInvalidatedIndexedWindowMoveRecoversRemainingSourceWindow() throws {
+        let fixture = try makeFixture(layouts: [.niri, .niri], followsFocus: false)
+        let sourceWorkspaceId = fixture.workspaceIds[0]
+        let fallback = try addManagedWindow(
+            pid: 488_006,
+            windowId: 81,
+            to: sourceWorkspaceId,
+            fixture: fixture
+        )
+        let moved = try addManagedWindow(
+            pid: 488_006,
+            windowId: 82,
+            to: sourceWorkspaceId,
+            fixture: fixture
+        )
+        try select(moved, in: sourceWorkspaceId, fixture: fixture)
+
+        try withBlockedLayoutRefreshes(fixture) {
+            fixture.controller.workspaceNavigationHandler.moveFocusedWindow(toWorkspaceIndex: 1)
+
+            let action = try pendingPostLayoutAction(fixture)
+            fixture.controller.workspaceManager.invalidateLayout(for: [sourceWorkspaceId])
+            XCTAssertFalse(action.isCurrent(using: fixture.controller.workspaceManager))
+            action.runIfCurrent(using: fixture.controller.workspaceManager)
+
+            XCTAssertEqual(fixture.focusRecorder.focusedTokens, [fallback.id])
+            XCTAssertEqual(fixture.controller.workspaceManager.pendingFocusedToken, fallback.id)
+            XCTAssertEqual(fixture.controller.intentLedger.activeManagedRequest?.token, fallback.id)
+        }
+    }
+
+    func testInvalidatedIndexedWindowMoveDoesNotOverrideNewerFocusIntent() throws {
+        let fixture = try makeFixture(layouts: [.niri, .niri], followsFocus: false)
+        let sourceWorkspaceId = fixture.workspaceIds[0]
+        let destinationWorkspaceId = fixture.workspaceIds[1]
+        _ = try addManagedWindow(
+            pid: 488_007,
+            windowId: 91,
+            to: sourceWorkspaceId,
+            fixture: fixture
+        )
+        let moved = try addManagedWindow(
+            pid: 488_007,
+            windowId: 92,
+            to: sourceWorkspaceId,
+            fixture: fixture
+        )
+        try select(moved, in: sourceWorkspaceId, fixture: fixture)
+
+        try withBlockedLayoutRefreshes(fixture) {
+            fixture.controller.workspaceNavigationHandler.moveFocusedWindow(toWorkspaceIndex: 1)
+
+            let action = try pendingPostLayoutAction(fixture)
+            let newerRequest = fixture.controller.intentLedger.beginManagedRequest(
+                token: moved.id,
+                workspaceId: destinationWorkspaceId
+            )
+            fixture.controller.workspaceManager.invalidateLayout(for: [sourceWorkspaceId])
+            XCTAssertFalse(action.isCurrent(using: fixture.controller.workspaceManager))
+            action.runIfCurrent(using: fixture.controller.workspaceManager)
+
+            XCTAssertTrue(fixture.focusRecorder.focusedTokens.isEmpty)
+            XCTAssertEqual(
+                fixture.controller.intentLedger.activeManagedRequest?.requestId,
+                newerRequest.requestId
+            )
+        }
+    }
+
+    func testInvalidatedWorkspaceMoveDoesNotOverrideNewerNonManagedFocus() throws {
+        for followsFocus in [false, true] {
+            let fixture = try makeFixture(layouts: [.niri, .niri], followsFocus: followsFocus)
+            let sourceWorkspaceId = fixture.workspaceIds[0]
+            _ = try addManagedWindow(
+                pid: 488_010,
+                windowId: followsFocus ? 122 : 121,
+                to: sourceWorkspaceId,
+                fixture: fixture
+            )
+            let moved = try addManagedWindow(
+                pid: 488_010,
+                windowId: followsFocus ? 124 : 123,
+                to: sourceWorkspaceId,
+                fixture: fixture
+            )
+            try select(moved, in: sourceWorkspaceId, fixture: fixture)
+
+            try withBlockedLayoutRefreshes(fixture) {
+                fixture.controller.workspaceNavigationHandler.moveFocusedWindow(toWorkspaceIndex: 1)
+
+                let action = try pendingPostLayoutAction(fixture)
+                XCTAssertTrue(fixture.controller.workspaceManager.enterNonManagedFocus())
+                XCTAssertFalse(action.isCurrent(using: fixture.controller.workspaceManager))
+                action.runIfCurrent(using: fixture.controller.workspaceManager)
+
+                XCTAssertTrue(fixture.focusRecorder.focusedTokens.isEmpty)
+                XCTAssertTrue(fixture.controller.workspaceManager.isNonManagedFocusActive)
+                XCTAssertNil(fixture.controller.intentLedger.activeManagedRequest)
+            }
+        }
+    }
+
+    func testCurrentIndexedWindowMoveDoesNotOverrideNewerFocusIntent() throws {
+        let fixture = try makeFixture(layouts: [.niri, .niri], followsFocus: false)
+        let sourceWorkspaceId = fixture.workspaceIds[0]
+        let destinationWorkspaceId = fixture.workspaceIds[1]
+        _ = try addManagedWindow(
+            pid: 488_009,
+            windowId: 111,
+            to: sourceWorkspaceId,
+            fixture: fixture
+        )
+        let moved = try addManagedWindow(
+            pid: 488_009,
+            windowId: 112,
+            to: sourceWorkspaceId,
+            fixture: fixture
+        )
+        try select(moved, in: sourceWorkspaceId, fixture: fixture)
+
+        try withBlockedLayoutRefreshes(fixture) {
+            fixture.controller.workspaceNavigationHandler.moveFocusedWindow(toWorkspaceIndex: 1)
+
+            let action = try pendingPostLayoutAction(fixture)
+            let newerRequest = fixture.controller.intentLedger.beginManagedRequest(
+                token: moved.id,
+                workspaceId: destinationWorkspaceId
+            )
+            XCTAssertTrue(action.isCurrent(using: fixture.controller.workspaceManager))
+            action.runIfCurrent(using: fixture.controller.workspaceManager)
+
+            XCTAssertTrue(fixture.focusRecorder.focusedTokens.isEmpty)
+            XCTAssertEqual(
+                fixture.controller.intentLedger.activeManagedRequest?.requestId,
+                newerRequest.requestId
+            )
+        }
+    }
+
+    func testIndexedWindowMoveToCurrentWorkspaceIsNoOp() throws {
+        let fixture = try makeFixture(layouts: [.niri], followsFocus: false)
+        let workspaceId = fixture.workspaceIds[0]
+        let window = try addManagedWindow(
+            pid: 488_008,
+            windowId: 101,
+            to: workspaceId,
+            fixture: fixture
+        )
+        try select(window, in: workspaceId, fixture: fixture)
+
+        fixture.controller.workspaceNavigationHandler.moveFocusedWindow(toWorkspaceIndex: 0)
+
+        XCTAssertEqual(fixture.controller.workspaceManager.workspace(for: window.id), workspaceId)
+        XCTAssertNil(fixture.controller.layoutRefreshController.layoutState.pendingRefresh)
+        XCTAssertTrue(fixture.focusRecorder.focusedTokens.isEmpty)
+        XCTAssertNil(fixture.controller.intentLedger.activeManagedRequest)
     }
 }
 
@@ -426,6 +662,13 @@ extension WorkspaceMoveFocusBehaviorTests {
             XCTAssertNil(manager.renderableFocusToken)
             XCTAssertNil(controller.intentLedger.activeManagedRequest)
         }
+    }
+
+    private func pendingPostLayoutAction(_ fixture: Fixture) throws -> RefreshPostLayoutAction {
+        let pending = try XCTUnwrap(fixture.controller.layoutRefreshController.layoutState.pendingRefresh)
+        XCTAssertEqual(pending.reason, .workspaceTransition)
+        XCTAssertEqual(pending.postLayoutActions.count, 1)
+        return try XCTUnwrap(pending.postLayoutActions.first)
     }
 
     private func withBlockedLayoutRefreshes<T>(

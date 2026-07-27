@@ -860,6 +860,7 @@ import QuartzCore
                 preserveWorkspaceInactive: transaction.preserveWorkspaceInactive
             )
         }
+        controller.axManager.clearParkPending(for: transaction.windowId, pid: transaction.pid)
         controller.surfaceReconciler.noteWorldChanged()
         if transaction.refreshOverviewOnSuccess {
             controller.windowActionHandler.refreshOverviewProjection(
@@ -1017,9 +1018,11 @@ import QuartzCore
     ) {
         guard let controller,
               let engine = controller.dwindleEngine,
-              let wsId = controller.activeWorkspace()?.id
+              let wsId = controller.activeWorkspace()?.id,
+              let monitor = controller.workspaceManager.monitor(for: wsId)
         else { return }
         controller.workspaceManager.withEngineMutationScope {
+            applyResolvedSettings(controller.settings.resolvedDwindleSettings(for: monitor), to: engine)
             perform(engine, wsId)
         }
     }

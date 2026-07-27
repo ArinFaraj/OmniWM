@@ -25,6 +25,9 @@ final class EventInterpreter: EventIntakeSink {
         case let .activationFactsResolved(facts):
             controller.axEventHandler.handleActivationFactsResolved(facts)
 
+        case let .focusedAdmissionRetryFactRequestSuperseded(execution):
+            controller.axEventHandler.finishFocusedAdmissionRetryExecution(execution)
+
         case .activeSpaceChanged:
             controller.serviceLifecycleManager.handleActiveSpaceDidChange()
 
@@ -107,13 +110,13 @@ final class EventInterpreter: EventIntakeSink {
 
         case .systemSleep:
             _ = controller.workspaceManager.recordReconcileEvent(.systemSleep(source: .service))
-            controller.mouseEventHandler.stopMultitouch()
+            controller.mouseEventHandler.suspendMultitouchForSleep()
 
         case .systemWake:
             _ = controller.workspaceManager.recordReconcileEvent(.systemWake(source: .service))
             controller.workspaceBarManager.cleanup()
             controller.layoutRefreshController.requestFullRescan(reason: .unlock)
-            controller.mouseEventHandler.restartMultitouch()
+            controller.mouseEventHandler.requestMultitouchRevalidation(.wake)
 
         case let .windowConstraintsResolved(fact):
             controller.layoutRefreshController.applyResolvedConstraints(fact)

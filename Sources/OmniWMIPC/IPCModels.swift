@@ -4,7 +4,7 @@
 import Foundation
 
 public enum OmniWMIPCProtocol {
-    public static let version = 7
+    public static let version = 9
 }
 
 public struct IPCRequestEnvelope: Decodable, Sendable {
@@ -80,6 +80,8 @@ public enum IPCErrorCode: String, Codable, Equatable, Sendable, Error {
     case unauthorized = "unauthorized"
     case staleWindowId = "stale_window_id"
     case notFound = "not_found"
+    case workspaceAssignmentConflict = "workspace_assignment_conflict"
+    case workspaceStateConflict = "workspace_state_conflict"
     case internalError = "internal_error"
 }
 
@@ -244,18 +246,18 @@ public enum IPCCommandName: String, Codable, CaseIterable, Equatable, Sendable {
     case moveColumnToWorkspaceUp = "move-column-to-workspace-up"
     case moveColumnToWorkspaceDown = "move-column-to-workspace-down"
     case toggleColumnTabbed = "toggle-column-tabbed"
-    case cycleColumnWidthForward = "cycle-column-width-forward"
-    case cycleColumnWidthBackward = "cycle-column-width-backward"
-    case cycleWindowWidthForward = "cycle-window-width-forward"
-    case cycleWindowWidthBackward = "cycle-window-width-backward"
-    case cycleWindowHeightForward = "cycle-window-height-forward"
-    case cycleWindowHeightBackward = "cycle-window-height-backward"
-    case toggleColumnFullWidth = "toggle-column-full-width"
-    case expandColumnToAvailableWidth = "expand-column-to-available-width"
-    case resetWindowHeight = "reset-window-height"
-    case setColumnWidth = "set-column-width"
-    case setWindowWidth = "set-window-width"
-    case setWindowHeight = "set-window-height"
+    case cycleSizeForward = "cycle-size-forward"
+    case cycleSizeBackward = "cycle-size-backward"
+    case cycleWindowPrimarySpanForward = "cycle-window-primary-span-forward"
+    case cycleWindowPrimarySpanBackward = "cycle-window-primary-span-backward"
+    case cycleWindowSecondarySpanForward = "cycle-window-secondary-span-forward"
+    case cycleWindowSecondarySpanBackward = "cycle-window-secondary-span-backward"
+    case toggleContainerFullPrimarySpan = "toggle-container-full-primary-span"
+    case expandContainerToAvailablePrimarySpan = "expand-container-to-available-primary-span"
+    case resetWindowSecondarySpan = "reset-window-secondary-span"
+    case setContainerPrimarySpan = "set-container-primary-span"
+    case setWindowPrimarySpan = "set-window-primary-span"
+    case setWindowSecondarySpan = "set-window-secondary-span"
     case swapWorkspaceWithMonitor = "swap-workspace-with-monitor"
     case balanceSizes = "balance-sizes"
     case moveToRoot = "move-to-root"
@@ -375,18 +377,18 @@ public enum IPCCommandRequest: Equatable, Sendable {
     case moveColumnToWorkspaceUp
     case moveColumnToWorkspaceDown
     case toggleColumnTabbed
-    case cycleColumnWidthForward
-    case cycleColumnWidthBackward
-    case cycleWindowWidthForward
-    case cycleWindowWidthBackward
-    case cycleWindowHeightForward
-    case cycleWindowHeightBackward
-    case toggleColumnFullWidth
-    case expandColumnToAvailableWidth
-    case resetWindowHeight
-    case setColumnWidth(change: IPCSizeChange)
-    case setWindowWidth(change: IPCSizeChange)
-    case setWindowHeight(change: IPCSizeChange)
+    case cycleSizeForward
+    case cycleSizeBackward
+    case cycleWindowPrimarySpanForward
+    case cycleWindowPrimarySpanBackward
+    case cycleWindowSecondarySpanForward
+    case cycleWindowSecondarySpanBackward
+    case toggleContainerFullPrimarySpan
+    case expandContainerToAvailablePrimarySpan
+    case resetWindowSecondarySpan
+    case setContainerPrimarySpan(change: IPCSizeChange)
+    case setWindowPrimarySpan(change: IPCSizeChange)
+    case setWindowSecondarySpan(change: IPCSizeChange)
     case swapWorkspaceWithMonitor(direction: IPCDirection)
     case balanceSizes
     case moveToRoot
@@ -505,30 +507,30 @@ public enum IPCCommandRequest: Equatable, Sendable {
             .moveColumnToWorkspaceDown
         case .toggleColumnTabbed:
             .toggleColumnTabbed
-        case .cycleColumnWidthForward:
-            .cycleColumnWidthForward
-        case .cycleColumnWidthBackward:
-            .cycleColumnWidthBackward
-        case .cycleWindowWidthForward:
-            .cycleWindowWidthForward
-        case .cycleWindowWidthBackward:
-            .cycleWindowWidthBackward
-        case .cycleWindowHeightForward:
-            .cycleWindowHeightForward
-        case .cycleWindowHeightBackward:
-            .cycleWindowHeightBackward
-        case .toggleColumnFullWidth:
-            .toggleColumnFullWidth
-        case .expandColumnToAvailableWidth:
-            .expandColumnToAvailableWidth
-        case .resetWindowHeight:
-            .resetWindowHeight
-        case .setColumnWidth:
-            .setColumnWidth
-        case .setWindowWidth:
-            .setWindowWidth
-        case .setWindowHeight:
-            .setWindowHeight
+        case .cycleSizeForward:
+            .cycleSizeForward
+        case .cycleSizeBackward:
+            .cycleSizeBackward
+        case .cycleWindowPrimarySpanForward:
+            .cycleWindowPrimarySpanForward
+        case .cycleWindowPrimarySpanBackward:
+            .cycleWindowPrimarySpanBackward
+        case .cycleWindowSecondarySpanForward:
+            .cycleWindowSecondarySpanForward
+        case .cycleWindowSecondarySpanBackward:
+            .cycleWindowSecondarySpanBackward
+        case .toggleContainerFullPrimarySpan:
+            .toggleContainerFullPrimarySpan
+        case .expandContainerToAvailablePrimarySpan:
+            .expandContainerToAvailablePrimarySpan
+        case .resetWindowSecondarySpan:
+            .resetWindowSecondarySpan
+        case .setContainerPrimarySpan:
+            .setContainerPrimarySpan
+        case .setWindowPrimarySpan:
+            .setWindowPrimarySpan
+        case .setWindowSecondarySpan:
+            .setWindowSecondarySpan
         case .swapWorkspaceWithMonitor:
             .swapWorkspaceWithMonitor
         case .balanceSizes:
@@ -773,39 +775,39 @@ public enum IPCCommandRequest: Equatable, Sendable {
         case .toggleColumnTabbed:
             try requireNoArguments()
             self = .toggleColumnTabbed
-        case .cycleColumnWidthForward:
+        case .cycleSizeForward:
             try requireNoArguments()
-            self = .cycleColumnWidthForward
-        case .cycleColumnWidthBackward:
+            self = .cycleSizeForward
+        case .cycleSizeBackward:
             try requireNoArguments()
-            self = .cycleColumnWidthBackward
-        case .cycleWindowWidthForward:
+            self = .cycleSizeBackward
+        case .cycleWindowPrimarySpanForward:
             try requireNoArguments()
-            self = .cycleWindowWidthForward
-        case .cycleWindowWidthBackward:
+            self = .cycleWindowPrimarySpanForward
+        case .cycleWindowPrimarySpanBackward:
             try requireNoArguments()
-            self = .cycleWindowWidthBackward
-        case .cycleWindowHeightForward:
+            self = .cycleWindowPrimarySpanBackward
+        case .cycleWindowSecondarySpanForward:
             try requireNoArguments()
-            self = .cycleWindowHeightForward
-        case .cycleWindowHeightBackward:
+            self = .cycleWindowSecondarySpanForward
+        case .cycleWindowSecondarySpanBackward:
             try requireNoArguments()
-            self = .cycleWindowHeightBackward
-        case .toggleColumnFullWidth:
+            self = .cycleWindowSecondarySpanBackward
+        case .toggleContainerFullPrimarySpan:
             try requireNoArguments()
-            self = .toggleColumnFullWidth
-        case .expandColumnToAvailableWidth:
+            self = .toggleContainerFullPrimarySpan
+        case .expandContainerToAvailablePrimarySpan:
             try requireNoArguments()
-            self = .expandColumnToAvailableWidth
-        case .resetWindowHeight:
+            self = .expandContainerToAvailablePrimarySpan
+        case .resetWindowSecondarySpan:
             try requireNoArguments()
-            self = .resetWindowHeight
-        case .setColumnWidth:
-            self = .setColumnWidth(change: try requireSizeChange())
-        case .setWindowWidth:
-            self = .setWindowWidth(change: try requireSizeChange())
-        case .setWindowHeight:
-            self = .setWindowHeight(change: try requireSizeChange())
+            self = .resetWindowSecondarySpan
+        case .setContainerPrimarySpan:
+            self = .setContainerPrimarySpan(change: try requireSizeChange())
+        case .setWindowPrimarySpan:
+            self = .setWindowPrimarySpan(change: try requireSizeChange())
+        case .setWindowSecondarySpan:
+            self = .setWindowSecondarySpan(change: try requireSizeChange())
         case .swapWorkspaceWithMonitor:
             self = .swapWorkspaceWithMonitor(direction: try requireDirection())
         case .balanceSizes:
@@ -1031,33 +1033,33 @@ extension IPCCommandRequest: Codable {
             self = .moveColumnToWorkspaceDown
         case .toggleColumnTabbed:
             self = .toggleColumnTabbed
-        case .cycleColumnWidthForward:
-            self = .cycleColumnWidthForward
-        case .cycleColumnWidthBackward:
-            self = .cycleColumnWidthBackward
-        case .cycleWindowWidthForward:
-            self = .cycleWindowWidthForward
-        case .cycleWindowWidthBackward:
-            self = .cycleWindowWidthBackward
-        case .cycleWindowHeightForward:
-            self = .cycleWindowHeightForward
-        case .cycleWindowHeightBackward:
-            self = .cycleWindowHeightBackward
-        case .toggleColumnFullWidth:
-            self = .toggleColumnFullWidth
-        case .expandColumnToAvailableWidth:
-            self = .expandColumnToAvailableWidth
-        case .resetWindowHeight:
-            self = .resetWindowHeight
-        case .setColumnWidth:
+        case .cycleSizeForward:
+            self = .cycleSizeForward
+        case .cycleSizeBackward:
+            self = .cycleSizeBackward
+        case .cycleWindowPrimarySpanForward:
+            self = .cycleWindowPrimarySpanForward
+        case .cycleWindowPrimarySpanBackward:
+            self = .cycleWindowPrimarySpanBackward
+        case .cycleWindowSecondarySpanForward:
+            self = .cycleWindowSecondarySpanForward
+        case .cycleWindowSecondarySpanBackward:
+            self = .cycleWindowSecondarySpanBackward
+        case .toggleContainerFullPrimarySpan:
+            self = .toggleContainerFullPrimarySpan
+        case .expandContainerToAvailablePrimarySpan:
+            self = .expandContainerToAvailablePrimarySpan
+        case .resetWindowSecondarySpan:
+            self = .resetWindowSecondarySpan
+        case .setContainerPrimarySpan:
             let arguments = try container.decode(IPCSizeChangeArguments.self, forKey: .arguments)
-            self = .setColumnWidth(change: arguments.change)
-        case .setWindowWidth:
+            self = .setContainerPrimarySpan(change: arguments.change)
+        case .setWindowPrimarySpan:
             let arguments = try container.decode(IPCSizeChangeArguments.self, forKey: .arguments)
-            self = .setWindowWidth(change: arguments.change)
-        case .setWindowHeight:
+            self = .setWindowPrimarySpan(change: arguments.change)
+        case .setWindowSecondarySpan:
             let arguments = try container.decode(IPCSizeChangeArguments.self, forKey: .arguments)
-            self = .setWindowHeight(change: arguments.change)
+            self = .setWindowSecondarySpan(change: arguments.change)
         case .swapWorkspaceWithMonitor:
             let arguments = try container.decode(IPCDirectionArguments.self, forKey: .arguments)
             self = .swapWorkspaceWithMonitor(direction: arguments.direction)
@@ -1214,29 +1216,29 @@ extension IPCCommandRequest: Codable {
             break
         case .toggleColumnTabbed:
             break
-        case .cycleColumnWidthForward:
+        case .cycleSizeForward:
             break
-        case .cycleColumnWidthBackward:
+        case .cycleSizeBackward:
             break
-        case .cycleWindowWidthForward:
+        case .cycleWindowPrimarySpanForward:
             break
-        case .cycleWindowWidthBackward:
+        case .cycleWindowPrimarySpanBackward:
             break
-        case .cycleWindowHeightForward:
+        case .cycleWindowSecondarySpanForward:
             break
-        case .cycleWindowHeightBackward:
+        case .cycleWindowSecondarySpanBackward:
             break
-        case .toggleColumnFullWidth:
+        case .toggleContainerFullPrimarySpan:
             break
-        case .expandColumnToAvailableWidth:
+        case .expandContainerToAvailablePrimarySpan:
             break
-        case .resetWindowHeight:
+        case .resetWindowSecondarySpan:
             break
-        case let .setColumnWidth(change):
+        case let .setContainerPrimarySpan(change):
             try container.encode(IPCSizeChangeArguments(change: change), forKey: .arguments)
-        case let .setWindowWidth(change):
+        case let .setWindowPrimarySpan(change):
             try container.encode(IPCSizeChangeArguments(change: change), forKey: .arguments)
-        case let .setWindowHeight(change):
+        case let .setWindowSecondarySpan(change):
             try container.encode(IPCSizeChangeArguments(change: change), forKey: .arguments)
         case let .swapWorkspaceWithMonitor(direction):
             try container.encode(IPCDirectionArguments(direction: direction), forKey: .arguments)
@@ -1552,7 +1554,7 @@ public struct IPCRuleDefinition: Codable, Equatable, Sendable {
     public let axSubrole: String?
     public let layout: IPCRuleLayout
     public let assignToWorkspace: String?
-    public let initialColumnWidth: Double?
+    public let initialContainerPrimarySpan: Double?
     public let minWidth: Double?
     public let minHeight: Double?
 
@@ -1565,7 +1567,7 @@ public struct IPCRuleDefinition: Codable, Equatable, Sendable {
         axSubrole: String? = nil,
         layout: IPCRuleLayout = .auto,
         assignToWorkspace: String? = nil,
-        initialColumnWidth: Double? = nil,
+        initialContainerPrimarySpan: Double? = nil,
         minWidth: Double? = nil,
         minHeight: Double? = nil
     ) {
@@ -1577,7 +1579,7 @@ public struct IPCRuleDefinition: Codable, Equatable, Sendable {
         self.axSubrole = axSubrole
         self.layout = layout
         self.assignToWorkspace = assignToWorkspace
-        self.initialColumnWidth = initialColumnWidth
+        self.initialContainerPrimarySpan = initialContainerPrimarySpan
         self.minWidth = minWidth
         self.minHeight = minHeight
     }
@@ -1735,15 +1737,28 @@ extension IPCRuleRequest: Codable {
 
 public enum IPCWorkspaceActionName: String, Codable, Equatable, Sendable {
     case focusName = "focus-name"
+    case moveToMonitor = "move-to-monitor"
 }
 
-public struct IPCWorkspaceRequest: Equatable, Sendable {
-    public let name: IPCWorkspaceActionName
-    public let target: WorkspaceTarget
+public enum IPCWorkspaceRequest: Equatable, Sendable {
+    case focusName(target: WorkspaceTarget)
+    case moveToMonitor(target: WorkspaceTarget, direction: IPCDirection, force: Bool = false)
 
-    public init(name: IPCWorkspaceActionName, target: WorkspaceTarget) {
-        self.name = name
-        self.target = target
+    public var name: IPCWorkspaceActionName {
+        switch self {
+        case .focusName:
+            .focusName
+        case .moveToMonitor:
+            .moveToMonitor
+        }
+    }
+
+    public var target: WorkspaceTarget {
+        switch self {
+        case let .focusName(target),
+             let .moveToMonitor(target, _, _):
+            target
+        }
     }
 }
 
@@ -1751,18 +1766,39 @@ extension IPCWorkspaceRequest: Codable {
     private enum CodingKeys: String, CodingKey {
         case name
         case workspaceTarget
+        case direction
+        case force
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        name = try container.decode(IPCWorkspaceActionName.self, forKey: .name)
-        target = try container.decode(WorkspaceTarget.self, forKey: .workspaceTarget)
+        let name = try container.decode(IPCWorkspaceActionName.self, forKey: .name)
+        let target = try container.decode(WorkspaceTarget.self, forKey: .workspaceTarget)
+
+        switch name {
+        case .focusName:
+            self = .focusName(target: target)
+        case .moveToMonitor:
+            self = .moveToMonitor(
+                target: target,
+                direction: try container.decode(IPCDirection.self, forKey: .direction),
+                force: try container.decodeIfPresent(Bool.self, forKey: .force) ?? false
+            )
+        }
     }
 
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(name, forKey: .name)
         try container.encode(target, forKey: .workspaceTarget)
+
+        switch self {
+        case .focusName:
+            break
+        case let .moveToMonitor(_, direction, force):
+            try container.encode(direction, forKey: .direction)
+            try container.encode(force, forKey: .force)
+        }
     }
 }
 
@@ -2316,6 +2352,7 @@ public struct IPCDisplayQuerySnapshot: Codable, Equatable, Sendable {
     public let visibleFrame: IPCRect?
     public let hasNotch: Bool?
     public let orientation: IPCDisplayOrientation?
+    public let innerGap: Double?
     public let outerGapLeft: Double?
     public let outerGapRight: Double?
     public let outerGapTop: Double?
@@ -2331,6 +2368,7 @@ public struct IPCDisplayQuerySnapshot: Codable, Equatable, Sendable {
         visibleFrame: IPCRect? = nil,
         hasNotch: Bool? = nil,
         orientation: IPCDisplayOrientation? = nil,
+        innerGap: Double? = nil,
         outerGapLeft: Double? = nil,
         outerGapRight: Double? = nil,
         outerGapTop: Double? = nil,
@@ -2345,6 +2383,7 @@ public struct IPCDisplayQuerySnapshot: Codable, Equatable, Sendable {
         self.visibleFrame = visibleFrame
         self.hasNotch = hasNotch
         self.orientation = orientation
+        self.innerGap = innerGap
         self.outerGapLeft = outerGapLeft
         self.outerGapRight = outerGapRight
         self.outerGapTop = outerGapTop
@@ -2388,7 +2427,7 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
     public let axSubrole: String?
     public let layout: IPCRuleLayout
     public let assignToWorkspace: String?
-    public let initialColumnWidth: Double?
+    public let initialContainerPrimarySpan: Double?
     public let minWidth: Double?
     public let minHeight: Double?
     public let specificity: Int
@@ -2398,7 +2437,7 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case id, position, bundleId, appNameSubstring, titleSubstring, titleRegex, axRole, axSubrole
-        case layout, assignToWorkspace, initialColumnWidth, minWidth, minHeight, specificity, isValid
+        case layout, assignToWorkspace, initialContainerPrimarySpan, minWidth, minHeight, specificity, isValid
         case invalidRegexMessage, validationMessages
     }
 
@@ -2413,7 +2452,7 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
         axSubrole: String? = nil,
         layout: IPCRuleLayout,
         assignToWorkspace: String? = nil,
-        initialColumnWidth: Double? = nil,
+        initialContainerPrimarySpan: Double? = nil,
         minWidth: Double? = nil,
         minHeight: Double? = nil,
         specificity: Int,
@@ -2431,7 +2470,7 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
         self.axSubrole = axSubrole
         self.layout = layout
         self.assignToWorkspace = assignToWorkspace
-        self.initialColumnWidth = initialColumnWidth
+        self.initialContainerPrimarySpan = initialContainerPrimarySpan
         self.minWidth = minWidth
         self.minHeight = minHeight
         self.specificity = specificity
@@ -2452,7 +2491,7 @@ public struct IPCRuleSnapshot: Codable, Equatable, Sendable {
         axSubrole = try container.decodeIfPresent(String.self, forKey: .axSubrole)
         layout = try container.decode(IPCRuleLayout.self, forKey: .layout)
         assignToWorkspace = try container.decodeIfPresent(String.self, forKey: .assignToWorkspace)
-        initialColumnWidth = try container.decodeIfPresent(Double.self, forKey: .initialColumnWidth)
+        initialContainerPrimarySpan = try container.decodeIfPresent(Double.self, forKey: .initialContainerPrimarySpan)
         minWidth = try container.decodeIfPresent(Double.self, forKey: .minWidth)
         minHeight = try container.decodeIfPresent(Double.self, forKey: .minHeight)
         specificity = try container.decode(Int.self, forKey: .specificity)

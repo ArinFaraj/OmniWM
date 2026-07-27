@@ -32,13 +32,13 @@ struct SettingsExport: Equatable {
     var outerGapTop: Double
     var outerGapBottom: Double
 
-    var niriMaxVisibleColumns: Int
+    var niriVisibleContainerCount: Int
     var niriInfiniteLoop: Bool
     var niriCenterFocusedColumn: String
     var niriAlwaysCenterSingleColumn: Bool
-    var niriSingleWindowAspectRatio: String
-    var niriColumnWidthPresets: [Double]?
-    var niriDefaultColumnWidth: Double?
+    var niriSingleWindowFit: String
+    var niriContainerPrimarySpanPresets: [Double]?
+    var niriDefaultContainerPrimarySpan: Double?
 
     var workspaceConfigurations: [WorkspaceConfiguration]
     var defaultLayoutType: String
@@ -70,6 +70,7 @@ struct SettingsExport: Equatable {
     var workspaceBarDeduplicateAppIcons: Bool
     var workspaceBarHideEmptyWorkspaces: Bool
     var workspaceBarExcludedBundleIDs: [String]
+    var workspaceBarIconOverrides: [String: String]
     var workspaceBarReserveLayoutSpace: Bool
     var workspaceBarRevealModifier: String
     var workspaceBarRevealHoldMilliseconds: Double
@@ -88,7 +89,7 @@ struct SettingsExport: Equatable {
     var dwindleSmartSplit: Bool
     var dwindleDefaultSplitRatio: Double
     var dwindleSplitWidthMultiplier: Double
-    var dwindleSingleWindowAspectRatio: String
+    var dwindleSingleWindowFit: String
     var dwindleUseGlobalGaps: Bool
     var dwindleMoveToRootStable: Bool
     var monitorDwindleSettings: [MonitorDwindleSettings]
@@ -128,6 +129,8 @@ struct SettingsExport: Equatable {
     var quakeTerminalAnimationDuration: Double
     var quakeTerminalAutoHide: Bool
     var quakeTerminalOpacity: Double?
+    var quakeTerminalBackgroundEffect: String
+    var quakeTerminalBackgroundBlurRadius: Int?
     var quakeTerminalMonitorMode: String?
 
     var appearanceMode: String
@@ -155,13 +158,13 @@ extension SettingsExport {
             outerGapRight: 0,
             outerGapTop: 0,
             outerGapBottom: 0,
-            niriMaxVisibleColumns: 2,
+            niriVisibleContainerCount: 2,
             niriInfiniteLoop: false,
             niriCenterFocusedColumn: CenterFocusedColumn.never.rawValue,
             niriAlwaysCenterSingleColumn: false,
-            niriSingleWindowAspectRatio: SingleWindowFit.fullScreen.serialized,
-            niriColumnWidthPresets: BuiltInSettingsDefaults.niriColumnWidthPresets,
-            niriDefaultColumnWidth: 0.5,
+            niriSingleWindowFit: SingleWindowFit.fullScreen.serialized,
+            niriContainerPrimarySpanPresets: BuiltInSettingsDefaults.niriContainerPrimarySpanPresets,
+            niriDefaultContainerPrimarySpan: 0.5,
             workspaceConfigurations: BuiltInSettingsDefaults.workspaceConfigurations,
             defaultLayoutType: LayoutType.niri.rawValue,
             bordersEnabled: true,
@@ -188,6 +191,7 @@ extension SettingsExport {
             workspaceBarDeduplicateAppIcons: false,
             workspaceBarHideEmptyWorkspaces: false,
             workspaceBarExcludedBundleIDs: [],
+            workspaceBarIconOverrides: [:],
             workspaceBarReserveLayoutSpace: false,
             workspaceBarRevealModifier: WorkspaceBarRevealModifier.off.rawValue,
             workspaceBarRevealHoldMilliseconds: 200,
@@ -204,7 +208,7 @@ extension SettingsExport {
             dwindleSmartSplit: false,
             dwindleDefaultSplitRatio: 1.0,
             dwindleSplitWidthMultiplier: 1.0,
-            dwindleSingleWindowAspectRatio: SingleWindowFit.fullScreen.serialized,
+            dwindleSingleWindowFit: SingleWindowFit.fullScreen.serialized,
             dwindleUseGlobalGaps: true,
             dwindleMoveToRootStable: true,
             monitorDwindleSettings: [],
@@ -240,6 +244,8 @@ extension SettingsExport {
             quakeTerminalAnimationDuration: 0.2,
             quakeTerminalAutoHide: false,
             quakeTerminalOpacity: 1.0,
+            quakeTerminalBackgroundEffect: QuakeTerminalBackgroundEffect.standardBlur.rawValue,
+            quakeTerminalBackgroundBlurRadius: QuakeTerminalAppearancePolicy.disabledBackgroundBlurRadius,
             quakeTerminalMonitorMode: QuakeTerminalMonitorMode.focusedWindow.rawValue,
             appearanceMode: AppearanceMode.dark.rawValue
         )

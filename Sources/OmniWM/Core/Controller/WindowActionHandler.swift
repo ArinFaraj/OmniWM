@@ -191,7 +191,7 @@ final class WindowActionHandler {
     }
 
     @discardableResult
-    func raiseFloatingWindow(_ token: WindowToken) -> Bool {
+    func focusCreatedFloatingWindow(_ token: WindowToken) -> Bool {
         guard let controller,
               !controller.isLockScreenActive
         else {
@@ -210,6 +210,12 @@ final class WindowActionHandler {
             return false
         }
 
+        controller.focusPolicyEngine.beginLease(
+            owner: .ruleCreatedFloatingWindow,
+            reason: "floating_window_create",
+            suppressesFocusFollowsMouse: true,
+            duration: 0.35
+        )
         orderWindow(UInt32(entry.windowId))
         controller.focusWindow(token)
         return true
@@ -424,6 +430,7 @@ final class WindowActionHandler {
     @discardableResult
     func navigateToWindowInternal(token: WindowToken, workspaceId: WorkspaceDescriptor.ID) -> Bool {
         guard let controller,
+              let handle = controller.workspaceManager.handle(for: token),
               let entry = controller.workspaceManager.entry(for: token),
               entry.workspaceId == workspaceId
         else {
@@ -466,25 +473,32 @@ final class WindowActionHandler {
                    let colIdx = engine.columnIndex(of: column, in: workspaceId),
                    let monitor = controller.workspaceManager.monitor(for: workspaceId)
                 {
-                    controller.workspaceManager.withEngineMutationScope {
-                        engine.activateWindow(niriWindow.id, in: workspaceId)
-                    }
-
                     let cols = engine.columns(in: workspaceId)
-                    let gap = CGFloat(controller.workspaceManager.gaps)
+                    let gap = controller.innerGap(for: monitor)
                     let settings = engine.effectiveSettings(in: workspaceId)
                     let workingFrame = controller.insetWorkingFrame(for: monitor)
+                    let orientation = controller.settings.effectiveOrientation(for: monitor)
+                    controller.workspaceManager.withEngineMutationScope {
+                        engine.activateWindow(niriWindow.id, in: workspaceId)
+                        engine.resolvePrimaryContainerSpans(
+                            in: workspaceId,
+                            workingFrame: workingFrame,
+                            gaps: gap,
+                            orientation: orientation
+                        )
+                    }
+
                     targetState.transitionToColumn(
                         colIdx,
                         columns: cols,
                         gap: gap,
-                        viewportWidth: workingFrame.width,
+                        workingArea: workingFrame,
+                        orientation: orientation,
                         motion: .disabled,
                         animate: false,
                         centerMode: settings.centerFocusedColumn,
                         alwaysCenterSingleColumn: settings.alwaysCenterSingleColumn,
                         scale: engine.displayScale(in: workspaceId),
-                        workingArea: workingFrame,
                         viewFrame: monitor.frame
                     )
                     targetState.selectionProgress = 0
@@ -500,10 +514,31 @@ final class WindowActionHandler {
                 )
             )
         }
-        controller.layoutRefreshController
-            .commitWorkspaceTransition(reason: .workspaceTransition) { [weak controller] in
-                controller?.focusWindow(token)
+        let newestFocusIntentId = controller.intentLedger.newestFocusIntentId()
+        let focusTarget: LayoutRefreshController.PostLayoutAction = { [weak controller] in
+            guard let controller,
+                  controller.activeWorkspace()?.id == workspaceId,
+                  controller.workspaceManager.handle(for: handle.id) === handle,
+                  controller.workspaceManager.entry(for: handle)?.workspaceId == workspaceId
+            else {
+                return
             }
+            controller.focusWindow(handle.id)
+        }
+        let focusTargetIfStillCurrent: LayoutRefreshController.PostLayoutAction = { [weak controller] in
+            guard let controller,
+                  controller.intentLedger.newestFocusIntentId() == newestFocusIntentId
+            else {
+                return
+            }
+            focusTarget()
+        }
+        controller.layoutRefreshController.commitWorkspaceTransition(
+            reason: .workspaceTransition,
+            postLayoutGateWorkspaceIds: [workspaceId],
+            postLayout: focusTarget,
+            postLayoutInvalidated: focusTargetIfStillCurrent
+        )
         return true
     }
 
@@ -559,7 +594,7 @@ final class WindowActionHandler {
             handle: WindowHandle(id: token),
             insertIndex: insertIndex,
             in: targetWorkspaceId,
-            widthPolicy: .inheritSource
+            sizingPolicy: .inheritSource
         ) else {
             return false
         }
@@ -680,7 +715,24 @@ final class WindowActionHandler {
         }
 
         guard let result = controller.workspaceManager.focusWorkspace(named: name) else { return false }
+        return completeWorkspaceFocusFromBar(result)
+    }
 
+    @discardableResult
+    func focusWorkspaceFromBar(id workspaceId: WorkspaceDescriptor.ID) -> Bool {
+        guard let controller else { return false }
+        if let currentWorkspace = controller.activeWorkspace() {
+            controller.workspaceNavigationHandler.saveNiriViewportState(for: currentWorkspace.id)
+        }
+
+        guard let result = controller.workspaceManager.focusWorkspace(id: workspaceId) else { return false }
+        return completeWorkspaceFocusFromBar(result)
+    }
+
+    private func completeWorkspaceFocusFromBar(
+        _ result: (workspace: WorkspaceDescriptor, monitor: Monitor)
+    ) -> Bool {
+        guard let controller else { return false }
         let focusedToken = controller.resolveAndSetWorkspaceFocusToken(for: result.workspace.id)
         if let focusedToken {
             _ = prepareDwindleNavigationTarget(focusedToken, workspaceId: result.workspace.id)

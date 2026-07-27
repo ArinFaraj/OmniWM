@@ -72,16 +72,40 @@ struct DesiredWindowState: Equatable {
 }
 
 struct DisplayFingerprint: Hashable, Equatable, Codable, Sendable {
+    let displayUUID: String?
     let displayId: CGDirectDisplayID
     let name: String
     let anchorPoint: CGPoint
     let frameSize: CGSize
 
     init(monitor: Monitor) {
+        displayUUID = monitor.displayUUID
         displayId = monitor.displayId
         name = monitor.name
         anchorPoint = monitor.workspaceAnchorPoint
         frameSize = monitor.frame.size
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case displayUUID, displayId, name, anchorPoint, frameSize
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        displayUUID = try DisplayUUID.decode(from: container, forKey: .displayUUID)
+        displayId = try container.decode(CGDirectDisplayID.self, forKey: .displayId)
+        name = try container.decode(String.self, forKey: .name)
+        anchorPoint = try container.decode(CGPoint.self, forKey: .anchorPoint)
+        frameSize = try container.decode(CGSize.self, forKey: .frameSize)
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(displayUUID, forKey: .displayUUID)
+        try container.encode(displayId, forKey: .displayId)
+        try container.encode(name, forKey: .name)
+        try container.encode(anchorPoint, forKey: .anchorPoint)
+        try container.encode(frameSize, forKey: .frameSize)
     }
 }
 
@@ -106,7 +130,7 @@ struct RestoreIntent: Equatable {
     var restoreToFloating: Bool
     var rescueEligible: Bool
     var niriPlacement: PersistedNiriPlacement? = nil
-    var detachedNiriColumnWidthState: NiriColumnWidthState? = nil
+    var detachedNiriContainerSizingState: NiriContainerSizingState? = nil
 }
 
 enum ReplacementCorrelation {
@@ -142,6 +166,7 @@ struct FocusSessionSnapshot: Equatable {
     var lastTiledFocusedByWorkspace: [WorkspaceDescriptor.ID: WindowToken] = [:]
     var lastFloatingFocusedByWorkspace: [WorkspaceDescriptor.ID: WindowToken] = [:]
     var lastTiledFocusedToken: WindowToken? = nil
+    var tiledFocusHistory: [WindowToken] = []
     var focusLease: FocusPolicyLease? = nil
     var isNonManagedFocusActive: Bool = false
     var nonManagedFocusToken: WindowToken? = nil
@@ -152,6 +177,18 @@ struct FocusSessionSnapshot: Equatable {
 }
 
 extension FocusSessionSnapshot {
+    @discardableResult
+    mutating func recordTiledFocus(_ token: WindowToken) -> Bool {
+        let previous = tiledFocusHistory
+        tiledFocusHistory.removeAll { $0 == token }
+        tiledFocusHistory.insert(token, at: 0)
+        if tiledFocusHistory.count > 32 {
+            tiledFocusHistory.removeLast(tiledFocusHistory.count - 32)
+        }
+        lastTiledFocusedToken = token
+        return tiledFocusHistory != previous
+    }
+
     @discardableResult
     mutating func rememberFocus(
         _ token: WindowToken,
@@ -179,6 +216,10 @@ extension FocusSessionSnapshot {
 
         if lastTiledFocusedToken == token {
             lastTiledFocusedToken = nil
+            changed = true
+        }
+        if tiledFocusHistory.contains(token) {
+            tiledFocusHistory.removeAll { $0 == token }
             changed = true
         }
 
@@ -214,6 +255,10 @@ extension FocusSessionSnapshot {
             lastTiledFocusedToken = newToken
             changed = true
         }
+        if tiledFocusHistory.contains(oldToken) {
+            tiledFocusHistory = tiledFocusHistory.map { $0 == oldToken ? newToken : $0 }
+            changed = true
+        }
 
         for (workspaceId, token) in lastTiledFocusedByWorkspace where token == oldToken {
             lastTiledFocusedByWorkspace[workspaceId] = newToken
@@ -247,6 +292,10 @@ extension FocusSessionSnapshot {
             }
             if lastTiledFocusedToken == token {
                 lastTiledFocusedToken = nil
+                changed = true
+            }
+            if tiledFocusHistory.contains(token) {
+                tiledFocusHistory.removeAll { $0 == token }
                 changed = true
             }
         }

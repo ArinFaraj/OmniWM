@@ -47,11 +47,6 @@ private enum ContainerVisibilityState {
     case hidden(AxisHideEdge)
 }
 
-private struct ContainerOverflowRegion {
-    let edge: AxisHideEdge
-    let rect: CGRect
-}
-
 extension NiriLayoutEngine {
     func calculateLayout(
         state: ViewportState,
@@ -61,7 +56,7 @@ extension NiriLayoutEngine {
         gaps: (horizontal: CGFloat, vertical: CGFloat),
         scale: CGFloat = 2.0,
         workingArea: WorkingAreaContext? = nil,
-        orientation: Monitor.Orientation = .horizontal
+        orientation: Monitor.Orientation
     ) -> [WindowToken: CGRect] {
         calculateLayoutWithVisibility(
             state: state,
@@ -83,7 +78,7 @@ extension NiriLayoutEngine {
         gaps: (horizontal: CGFloat, vertical: CGFloat),
         scale: CGFloat = 2.0,
         workingArea: WorkingAreaContext? = nil,
-        orientation: Monitor.Orientation = .horizontal,
+        orientation: Monitor.Orientation,
         animationTime: TimeInterval? = nil,
         hiddenPlacementMonitor: HiddenPlacementMonitorContext? = nil,
         hiddenPlacementMonitors: [HiddenPlacementMonitorContext] = [],
@@ -122,7 +117,7 @@ extension NiriLayoutEngine {
         gaps: (horizontal: CGFloat, vertical: CGFloat),
         scale: CGFloat = 2.0,
         workingArea: WorkingAreaContext? = nil,
-        orientation: Monitor.Orientation = .horizontal,
+        orientation: Monitor.Orientation,
         animationTime: TimeInterval? = nil,
         hiddenPlacementMonitor: HiddenPlacementMonitorContext? = nil,
         hiddenPlacementMonitors: [HiddenPlacementMonitorContext] = [],
@@ -164,7 +159,8 @@ extension NiriLayoutEngine {
                 renderedFullscreenRect: renderedFullscreenRect,
                 workspaceOffset: workspaceOffset,
                 scale: effectiveScale,
-                gaps: gaps.horizontal,
+                primaryGap: primaryGap,
+                secondaryGap: secondaryGap,
                 screenClampRect: viewFrame,
                 time: time,
                 result: &frames,
@@ -177,7 +173,11 @@ extension NiriLayoutEngine {
             switch orientation {
             case .horizontal:
                 if container.cachedWidth <= 0 {
-                    container.resolveAndCacheWidth(workingAreaWidth: workingFrame.width, gaps: primaryGap)
+                    container.resolveAndCacheWidth(
+                        workingAreaWidth: workingFrame.width,
+                        gaps: primaryGap,
+                        contentInset: tabContentInset(for: container)
+                    )
                 }
             case .vertical:
                 if container.cachedHeight <= 0 {
@@ -233,8 +233,7 @@ extension NiriLayoutEngine {
                 scale: effectiveScale,
                 orientation: orientation
             )
-            let renderedContainerRect: CGRect
-            switch sampledContainerVisibilityState(
+            var visibilityState = sampledContainerVisibilityState(
                 canonicalRect: canonicalContainerRect,
                 viewPositions: visibilityViewPositions,
                 workspaceOffset: workspaceOffset,
@@ -246,7 +245,25 @@ extension NiriLayoutEngine {
                 orientation: orientation,
                 hiddenPlacementMonitor: hiddenPlacementMonitor,
                 hiddenPlacementMonitors: hiddenPlacementMonitors
-            ) {
+            )
+            if case .visible = visibilityState {
+                let clampedVisibilityRect = NiriMonitorPlaneGeometry.clampedFrame(
+                    visibilityRect,
+                    screenClampRect: viewFrame,
+                    orientation: orientation
+                )
+                if let liveOverflowEdge = NiriMonitorPlaneGeometry.overflowEdgeIntersectingNeighboringMonitor(
+                    clampedVisibilityRect,
+                    viewportFrame: workingFrame,
+                    orientation: orientation,
+                    hiddenPlacementMonitor: hiddenPlacementMonitor,
+                    hiddenPlacementMonitors: hiddenPlacementMonitors
+                ) {
+                    visibilityState = .hidden(liveOverflowEdge)
+                }
+            }
+            let renderedContainerRect: CGRect
+            switch visibilityState {
             case .visible:
                 renderedContainerRect = visibilityRect
                 if containers[idx].isTabbed {
@@ -282,6 +299,7 @@ extension NiriLayoutEngine {
                 fullscreenRect: canonicalFullscreenRect,
                 renderedFullscreenRect: renderedFullscreenRect,
                 secondaryGap: secondaryGap,
+                secondarySpanOverride: nil,
                 scale: effectiveScale,
                 screenClampRect: viewFrame,
                 animationTime: time,
@@ -410,7 +428,7 @@ extension NiriLayoutEngine {
         ) else {
             return .hidden(defaultHideEdge)
         }
-        if let overflowEdge = overflowEdgeIntersectingNeighboringMonitor(
+        if let overflowEdge = NiriMonitorPlaneGeometry.overflowEdgeIntersectingNeighboringMonitor(
             renderedRect,
             viewportFrame: viewportFrame,
             orientation: orientation,
@@ -433,128 +451,6 @@ extension NiriLayoutEngine {
         case .vertical:
             containerRect.maxY > viewportFrame.minY && containerRect.minY < viewportFrame.maxY
         }
-    }
-
-    private func overflowEdgeIntersectingNeighboringMonitor(
-        _ renderedRect: CGRect,
-        viewportFrame: CGRect,
-        orientation: Monitor.Orientation,
-        hiddenPlacementMonitor: HiddenPlacementMonitorContext?,
-        hiddenPlacementMonitors: [HiddenPlacementMonitorContext]
-    ) -> AxisHideEdge? {
-        let overflowRegions = containerOverflowRegions(
-            for: renderedRect,
-            viewportFrame: viewportFrame,
-            orientation: orientation
-        )
-        guard !overflowRegions.isEmpty else { return nil }
-
-        for overflowRegion in overflowRegions {
-            for otherMonitor in hiddenPlacementMonitors where !ownsViewport(
-                otherMonitor,
-                hiddenPlacementMonitor: hiddenPlacementMonitor,
-                viewportFrame: viewportFrame
-            ) {
-                if overflowRegion.rect.intersects(otherMonitor.frame) {
-                    return overflowRegion.edge
-                }
-            }
-        }
-
-        return nil
-    }
-
-    private func containerOverflowRegions(
-        for renderedRect: CGRect,
-        viewportFrame: CGRect,
-        orientation: Monitor.Orientation
-    ) -> [ContainerOverflowRegion] {
-        var overflowRegions: [ContainerOverflowRegion] = []
-        overflowRegions.reserveCapacity(2)
-
-        switch orientation {
-        case .horizontal:
-            if renderedRect.minX < viewportFrame.minX {
-                let overflowMaxX = min(renderedRect.maxX, viewportFrame.minX)
-                if overflowMaxX > renderedRect.minX {
-                    overflowRegions.append(
-                        ContainerOverflowRegion(
-                            edge: .minimum,
-                            rect: CGRect(
-                                x: renderedRect.minX,
-                                y: renderedRect.minY,
-                                width: overflowMaxX - renderedRect.minX,
-                                height: renderedRect.height
-                            )
-                        )
-                    )
-                }
-            }
-            if renderedRect.maxX > viewportFrame.maxX {
-                let overflowMinX = max(renderedRect.minX, viewportFrame.maxX)
-                if renderedRect.maxX > overflowMinX {
-                    overflowRegions.append(
-                        ContainerOverflowRegion(
-                            edge: .maximum,
-                            rect: CGRect(
-                                x: overflowMinX,
-                                y: renderedRect.minY,
-                                width: renderedRect.maxX - overflowMinX,
-                                height: renderedRect.height
-                            )
-                        )
-                    )
-                }
-            }
-        case .vertical:
-            if renderedRect.minY < viewportFrame.minY {
-                let overflowMaxY = min(renderedRect.maxY, viewportFrame.minY)
-                if overflowMaxY > renderedRect.minY {
-                    overflowRegions.append(
-                        ContainerOverflowRegion(
-                            edge: .minimum,
-                            rect: CGRect(
-                                x: renderedRect.minX,
-                                y: renderedRect.minY,
-                                width: renderedRect.width,
-                                height: overflowMaxY - renderedRect.minY
-                            )
-                        )
-                    )
-                }
-            }
-            if renderedRect.maxY > viewportFrame.maxY {
-                let overflowMinY = max(renderedRect.minY, viewportFrame.maxY)
-                if renderedRect.maxY > overflowMinY {
-                    overflowRegions.append(
-                        ContainerOverflowRegion(
-                            edge: .maximum,
-                            rect: CGRect(
-                                x: renderedRect.minX,
-                                y: overflowMinY,
-                                width: renderedRect.width,
-                                height: renderedRect.maxY - overflowMinY
-                            )
-                        )
-                    )
-                }
-            }
-        }
-
-        return overflowRegions
-    }
-
-    private func ownsViewport(
-        _ candidateMonitor: HiddenPlacementMonitorContext,
-        hiddenPlacementMonitor: HiddenPlacementMonitorContext?,
-        viewportFrame: CGRect
-    ) -> Bool {
-        if let hiddenPlacementMonitor {
-            return candidateMonitor.id == hiddenPlacementMonitor.id
-        }
-
-        return candidateMonitor.frame.intersects(viewportFrame)
-            || candidateMonitor.visibleFrame.intersects(viewportFrame)
     }
 
     private func hiddenEdge(
@@ -649,14 +545,14 @@ extension NiriLayoutEngine {
 
     private func centeredSingleWindowRect(
         in workingFrame: CGRect,
-        width: CGFloat,
+        size: CGSize,
         scale: CGFloat
     ) -> CGRect {
         CGRect(
-            x: workingFrame.minX + (workingFrame.width - width) / 2,
-            y: workingFrame.minY,
-            width: width,
-            height: workingFrame.height
+            x: workingFrame.minX + (workingFrame.width - size.width) / 2,
+            y: workingFrame.minY + (workingFrame.height - size.height) / 2,
+            width: size.width,
+            height: size.height
         ).roundedToPhysicalPixels(scale: scale)
     }
 
@@ -678,22 +574,74 @@ extension NiriLayoutEngine {
         in workingFrame: CGRect,
         fullscreenLayoutFrame: CGRect? = nil,
         scale: CGFloat,
-        gaps: CGFloat
+        primaryGap: CGFloat,
+        secondaryGap: CGFloat,
+        orientation: Monitor.Orientation
     ) -> CGRect {
         let minSize = context.window.constraints.normalized().minSize
-        guard context.container.hasManualSingleWindowWidthOverride else {
+        let hasManualPrimaryOverride = switch orientation {
+        case .horizontal:
+            context.container.hasManualSingleWindowWidthOverride
+        case .vertical:
+            context.container.hasManualSingleWindowHeightOverride
+        }
+        let hasManualSecondaryOverride = orientation == .vertical && context.window.windowWidth != .default
+        guard hasManualPrimaryOverride || hasManualSecondaryOverride else {
             let baseFrame = context.fit.mode == .fill ? fullscreenLayoutFrame ?? workingFrame : workingFrame
             return rectExpandedToMinimum(context.fit.frame(in: baseFrame), minSize: minSize)
                 .roundedToPhysicalPixels(scale: scale)
         }
 
-        if context.container.cachedWidth <= 0 {
-            context.container.resolveAndCacheWidth(workingAreaWidth: workingFrame.width, gaps: gaps)
+        let boundedSize: CGSize
+        switch orientation {
+        case .horizontal:
+            if context.container.cachedWidth <= 0 {
+                context.container.resolveAndCacheWidth(
+                    workingAreaWidth: workingFrame.width,
+                    gaps: primaryGap,
+                    contentInset: tabContentInset(for: context.container)
+                )
+            }
+            boundedSize = CGSize(
+                width: min(workingFrame.width, max(0, context.container.cachedWidth)),
+                height: workingFrame.height
+            )
+        case .vertical:
+            let windowWidth: CGFloat
+            if hasManualSecondaryOverride {
+                windowWidth = switch context.window.windowWidth {
+                case let .fixed(width):
+                    width
+                case let .preset(index):
+                    resolvePresetSpan(
+                        presetWindowSecondarySpans,
+                        index: index,
+                        availableSpace: workingFrame.width,
+                        gap: secondaryGap
+                    ) ?? workingFrame.width
+                case .auto:
+                    context.window.resolvedWidth ?? context.window.frame?.width ?? workingFrame.width
+                }
+            } else {
+                windowWidth = workingFrame.width
+            }
+            if context.container.cachedHeight <= 0 {
+                context.container.resolveAndCacheHeight(
+                    workingAreaHeight: workingFrame.height,
+                    gaps: primaryGap
+                )
+            }
+            let tabOffset = context.container.isTabbed ? renderStyle.tabIndicatorWidth : 0
+            let containerWidth = hasManualSecondaryOverride
+                ? context.window.constraints.clampWidth(windowWidth) + tabOffset
+                : windowWidth
+            boundedSize = CGSize(
+                width: min(workingFrame.width, max(0, containerWidth)),
+                height: min(workingFrame.height, max(0, context.container.cachedHeight))
+            )
         }
-
-        let resolvedWidth = min(workingFrame.width, max(0, context.container.cachedWidth))
         return rectExpandedToMinimum(
-            centeredSingleWindowRect(in: workingFrame, width: resolvedWidth, scale: scale),
+            centeredSingleWindowRect(in: workingFrame, size: boundedSize, scale: scale),
             minSize: minSize
         ).roundedToPhysicalPixels(scale: scale)
     }
@@ -706,7 +654,8 @@ extension NiriLayoutEngine {
         renderedFullscreenRect: CGRect,
         workspaceOffset: CGFloat,
         scale: CGFloat,
-        gaps: CGFloat,
+        primaryGap: CGFloat,
+        secondaryGap: CGFloat,
         screenClampRect: CGRect,
         time: TimeInterval,
         result: inout [WindowToken: CGRect],
@@ -717,12 +666,22 @@ extension NiriLayoutEngine {
             in: workingFrame,
             fullscreenLayoutFrame: fullscreenLayoutFrame,
             scale: scale,
-            gaps: gaps
+            primaryGap: primaryGap,
+            secondaryGap: secondaryGap,
+            orientation: orientation
         )
         let renderOffset = context.container.renderOffset(at: time)
         let renderedRect = canonicalRect
             .offsetBy(dx: workspaceOffset + renderOffset.x, dy: renderOffset.y)
             .roundedToPhysicalPixels(scale: scale)
+        let tabOffset = context.container.isTabbed ? renderStyle.tabIndicatorWidth : 0
+        let secondarySpanOverride: CGFloat? = if orientation == .vertical,
+                                                 context.window.windowWidth != .default
+        {
+            max(0, canonicalRect.width - tabOffset)
+        } else {
+            nil
+        }
 
         layoutContainer(
             container: context.container,
@@ -731,6 +690,7 @@ extension NiriLayoutEngine {
             fullscreenRect: fullscreenRect,
             renderedFullscreenRect: renderedFullscreenRect,
             secondaryGap: 0,
+            secondarySpanOverride: secondarySpanOverride,
             scale: scale,
             screenClampRect: screenClampRect,
             animationTime: time,
@@ -746,6 +706,7 @@ extension NiriLayoutEngine {
         fullscreenRect: CGRect,
         renderedFullscreenRect: CGRect,
         secondaryGap: CGFloat,
+        secondarySpanOverride: CGFloat?,
         scale: CGFloat,
         screenClampRect: CGRect,
         animationTime: TimeInterval? = nil,
@@ -774,13 +735,17 @@ extension NiriLayoutEngine {
         case .vertical: contentRect.width
         }
 
-        let resolvedSpans = resolveWindowSpans(
-            windows: windows,
-            availableSpace: availableSpace,
-            gap: secondaryGap,
-            isTabbed: isTabbed,
-            orientation: orientation
-        )
+        let resolvedSpans = if let secondarySpanOverride, windows.count == 1 {
+            [secondarySpanOverride]
+        } else {
+            resolveWindowSpans(
+                windows: windows,
+                availableSpace: availableSpace,
+                gap: secondaryGap,
+                isTabbed: isTabbed,
+                orientation: orientation
+            )
+        }
 
         let sizingModes = windows.map { $0.sizingMode }
         let windowRenderOffsets = windows.map { $0.renderOffset(at: time) }
@@ -862,23 +827,24 @@ extension NiriLayoutEngine {
                     if maxX >= minX {
                         offsetFrame.origin.x = min(max(offsetFrame.origin.x, minX), maxX)
                     }
+                    if let containmentFrame = windows[i].moveYContainmentFrame,
+                       renderedBaseFrame.minY >= containmentFrame.minY,
+                       renderedBaseFrame.maxY <= containmentFrame.maxY
+                    {
+                        let minY = containmentFrame.minY
+                        let maxY = containmentFrame.maxY - offsetFrame.height
+                        if maxY >= minY {
+                            offsetFrame.origin.y = min(max(offsetFrame.origin.y, minY), maxY)
+                        }
+                    }
                 }
                 animatedFrame = offsetFrame
             }
-            switch orientation {
-            case .horizontal:
-                let minX = screenClampRect.minX - animatedFrame.width + 1
-                let maxX = screenClampRect.maxX - 1
-                if maxX >= minX {
-                    animatedFrame.origin.x = min(max(animatedFrame.origin.x, minX), maxX)
-                }
-            case .vertical:
-                let minY = screenClampRect.minY - animatedFrame.height + 1
-                let maxY = screenClampRect.maxY - 1
-                if maxY >= minY {
-                    animatedFrame.origin.y = min(max(animatedFrame.origin.y, minY), maxY)
-                }
-            }
+            animatedFrame = NiriMonitorPlaneGeometry.clampedFrame(
+                animatedFrame,
+                screenClampRect: screenClampRect,
+                orientation: orientation
+            )
             let roundedAnimatedFrame = animatedFrame.roundedToPhysicalPixels(scale: scale)
             windows[i].renderedFrame = roundedAnimatedFrame
             result[windowTokens[i]] = roundedAnimatedFrame
@@ -916,7 +882,7 @@ extension NiriLayoutEngine {
                 case let .preset(index):
                     isFixed = true
                     fixedValue = resolvePresetSpan(
-                        presetWindowHeights,
+                        presetWindowSecondarySpans,
                         index: index,
                         availableSpace: availableSpace,
                         gap: gap
@@ -944,7 +910,7 @@ extension NiriLayoutEngine {
                 case let .preset(index):
                     isFixed = true
                     fixedValue = resolvePresetSpan(
-                        presetWindowHeights,
+                        presetWindowSecondarySpans,
                         index: index,
                         availableSpace: availableSpace,
                         gap: gap

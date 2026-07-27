@@ -14,6 +14,22 @@ private struct IndexedAsyncValue<Value: Sendable>: Sendable {
     let value: Value
 }
 
+struct AXFrameApplicationTarget: Sendable {
+    let pid: pid_t
+    let expectedWindow: AXWindowRef
+    let frame: CGRect
+
+    var windowId: Int {
+        expectedWindow.windowId
+    }
+
+    init(pid: pid_t, window: AXWindowRef, frame: CGRect) {
+        self.pid = pid
+        expectedWindow = window
+        self.frame = frame
+    }
+}
+
 func boundedFullRescanMap<Input: Sendable, Output: Sendable>(
     _ inputs: [Input],
     maxConcurrent: Int,
@@ -138,7 +154,11 @@ final class AXManager {
     var onAppTerminated: ((pid_t) -> Void)?
     var isWindowParked: ((Int) -> Bool)?
     var onTerminalFrameRefusal: ((AXFrameTerminalRefusal) -> Void)?
-    var onFrameApplySucceeded: ((Int) -> Void)?
+    var onFrameApplySucceeded: ((AXFrameApplyResult) -> Void)?
+    var onManagedWindowBindingFailed: (() -> Void)?
+    var managedWindowBindingRetryDelayProvider: (Int) -> Duration? = {
+        AXManager.managedWindowBindingRetryDelay(afterFailure: $0)
+    }
 
     private let frameLedger = AXFrameApplicationLedger()
     private var framesByPidBuffer: [pid_t: [AXFrameApplicationRequest]] = [:]
@@ -146,16 +166,35 @@ final class AXManager {
     private var pendingFrameRetryTasksByWindowId: [Int: Task<Void, Never>] = [:]
     private var pendingFrameRetryGenerationByWindowId: [Int: UInt64] = [:]
     private var nextFrameRetryGeneration: UInt64 = 1
+    private struct ManagedWindowBindingRetryState {
+        let generation: UInt64
+        var failures: Int
+        var task: Task<Void, Never>?
+    }
+
+    private var nextManagedWindowBindingGeneration: UInt64 = 1
+    private var managedWindowBindingRetryStateByPID: [pid_t: ManagedWindowBindingRetryState] = [:]
 
     /// Window IDs belonging to inactive workspaces — checked LIVE in applyFramesParallel.
     private(set) var inactiveWorkspaceWindowIds: Set<Int> = []
 
     private var skyLightLivePositionByWindowId: [Int: CGPoint] = [:]
 
+    private struct PendingParkFrameRequest {
+        let request: AXFrameApplicationRequest
+        let retriesRemaining: Int
+    }
+
+    private struct ParkFrameTargetState {
+        let target: AXFrameApplicationTarget
+        var isVerified: Bool
+    }
+
     private(set) var pendingParkWindowIds: Set<Int> = []
-    private var frameOrderSeq: UInt64 = 0
-    private var lastParkCommandSeqByWindowId: [Int: UInt64] = [:]
-    private var lastFrameResultSeqByWindowId: [Int: UInt64] = [:]
+    private var pendingParkFrameRequestsByWindowId: [Int: PendingParkFrameRequest] = [:]
+    private var parkFrameTargetStatesByWindowId: [Int: ParkFrameTargetState] = [:]
+    private var parkPIDByWindowId: [Int: pid_t] = [:]
+    private var nextParkFrameRequestId: AXFrameRequestId = 1
 
     init() {
         installWorkspaceObservers()
@@ -189,6 +228,8 @@ final class AXManager {
                 )
             }
             Task { @MainActor in
+                self?.clearManagedWindowBindingRetry(for: pid)
+                self?.clearParkFrameState(for: pid, reason: "context-teardown")
                 self?.onAppTerminated?(pid)
                 if let context = AppAXContext.contexts[pid] {
                     context.destroy()
@@ -262,23 +303,68 @@ final class AXManager {
         skyLightLivePositionByWindowId.removeAll(keepingCapacity: true)
     }
 
+    func markParkPending(_ target: AXFrameApplicationTarget) {
+        markParkPending(
+            for: target.windowId,
+            pid: target.pid,
+            target: target,
+            cancellationReason: "animation"
+        )
+    }
+
     func markParkPending(for windowId: Int, pid: pid_t) {
-        guard pendingParkWindowIds.insert(windowId).inserted else { return }
-        FrameApplyTrace.recordEvent(pid: pid, windowId: windowId, outcome: "outcome=park-pending")
+        markParkPending(
+            for: windowId,
+            pid: pid,
+            target: nil,
+            cancellationReason: nil
+        )
     }
 
-    func recordParkCommand(for windowId: Int) {
-        frameOrderSeq &+= 1
-        lastParkCommandSeqByWindowId[windowId] = frameOrderSeq
+    private func markParkPending(
+        for windowId: Int,
+        pid: pid_t,
+        target: AXFrameApplicationTarget?,
+        cancellationReason: String?
+    ) {
+        let pending = pendingParkFrameRequestsByWindowId.removeValue(forKey: windowId)
+        let targetState = parkFrameTargetStatesByWindowId[windowId]
+        if let pending {
+            AppAXContext.contexts[pending.request.pid]?.cancelParkFrameJob(for: windowId)
+        }
+        let retainedTarget = target
+            ?? pending.map {
+                AXFrameApplicationTarget(
+                    pid: $0.request.pid,
+                    window: $0.request.expectedWindow,
+                    frame: $0.request.frame
+                )
+            }
+            ?? targetState?.target
+        if let retainedTarget {
+            parkFrameTargetStatesByWindowId[windowId] = ParkFrameTargetState(
+                target: retainedTarget,
+                isVerified: false
+            )
+        } else {
+            parkFrameTargetStatesByWindowId.removeValue(forKey: windowId)
+        }
+        pendingParkWindowIds.insert(windowId)
+        parkPIDByWindowId[windowId] = pid
+        let cancelledTarget = pending?.request.frame
+            ?? (targetState?.isVerified == true ? targetState?.target.frame : nil)
+        if let cancellationReason, let cancelledTarget {
+            FrameApplyTrace.recordEvent(
+                pid: pid,
+                windowId: windowId,
+                outcome: "outcome=ax-park-cancelled/\(cancellationReason)",
+                target: cancelledTarget
+            )
+        }
     }
 
-    func parkQuietSinceCommand(for windowId: Int) -> Bool {
-        (lastFrameResultSeqByWindowId[windowId] ?? 0) <= (lastParkCommandSeqByWindowId[windowId] ?? 0)
-    }
-
-    func clearParkPending(for windowId: Int, pid: pid_t, reason: String) {
-        guard pendingParkWindowIds.remove(windowId) != nil else { return }
-        FrameApplyTrace.recordEvent(pid: pid, windowId: windowId, outcome: "outcome=park-cleared/\(reason)")
+    func clearParkPending(for windowId: Int, pid: pid_t, reason: String = "revealed") {
+        cancelParkFrameJobs([(pid: pid, windowId: windowId)], reason: reason)
     }
 
     private func clearSkyLightLivePosition(for windowId: Int) {
@@ -420,6 +506,7 @@ final class AXManager {
             guard (try? await acknowledgement.destinationContext.commitWindowRebindAsync(
                 oldWindow: oldWindow.axRef,
                 newWindow: newWindow.axRef,
+                binding: acknowledgement.destinationBinding,
                 retireOldWindowState: acknowledgement.oldContext === acknowledgement.destinationContext
             )) == true else {
                 return false
@@ -431,17 +518,11 @@ final class AXManager {
             ) else {
                 return false
             }
-            if acknowledgement.oldContext === acknowledgement.destinationContext {
-                acknowledgement.destinationContext.finalizeWindowRebind(
-                    from: oldWindow.token.windowId,
-                    to: newWindow.token.windowId
-                )
-            }
             if acknowledgement.oldContext !== acknowledgement.destinationContext {
                 if let oldContext = acknowledgement.oldContext,
                    (try? await oldContext.removeWindowStateAsync(
-                       windowId: oldWindow.token.windowId
-                   )) != true
+                       expectedWindow: oldWindow.axRef
+                   )) == nil
                 {
                     return false
                 }
@@ -453,17 +534,49 @@ final class AXManager {
             ) else {
                 return false
             }
-            acknowledgement.destinationContext.cancelFrameJob(for: newWindow.token.windowId)
         }
         return true
     }
 
     func commitFrameApplicationStateForRebind(
         from oldWindow: AXManagedWindowIdentity,
-        to newWindow: AXManagedWindowIdentity
+        to newWindow: AXManagedWindowIdentity,
+        acknowledgement: AXManagedWindowRebindAcknowledgement? = nil
     ) {
         let oldWindowId = oldWindow.token.windowId
         let newWindowId = newWindow.token.windowId
+        let parkFrame = pendingParkFrameRequestsByWindowId[oldWindowId]?.request.frame
+            ?? parkFrameTargetStatesByWindowId[oldWindowId]?.target.frame
+            ?? pendingParkFrameRequestsByWindowId[newWindowId]?.request.frame
+            ?? parkFrameTargetStatesByWindowId[newWindowId]?.target.frame
+        let shouldReissuePark = pendingParkWindowIds.contains(oldWindowId)
+            || pendingParkWindowIds.contains(newWindowId)
+            || pendingParkFrameRequestsByWindowId[oldWindowId] != nil
+            || pendingParkFrameRequestsByWindowId[newWindowId] != nil
+            || parkFrameTargetStatesByWindowId[oldWindowId] != nil
+            || parkFrameTargetStatesByWindowId[newWindowId] != nil
+            || isWindowParked?(oldWindowId) == true
+            || isWindowParked?(newWindowId) == true
+        cancelParkFrameJobs(
+            [
+                (pid: oldWindow.token.pid, windowId: oldWindowId),
+                (pid: newWindow.token.pid, windowId: newWindowId)
+            ],
+            reason: "rekey"
+        )
+        if let acknowledgement {
+            if acknowledgement.oldContext === acknowledgement.destinationContext {
+                acknowledgement.destinationContext.prepareWindowRebind(
+                    from: oldWindowId,
+                    to: newWindowId
+                )
+            } else {
+                acknowledgement.oldContext?.prepareWindowRemoval(for: oldWindowId)
+                acknowledgement.oldContext?.invalidateWindowIdentity()
+                acknowledgement.destinationContext.prepareWindowRemoval(for: newWindowId)
+                acknowledgement.destinationContext.invalidateWindowIdentity()
+            }
+        }
         let isIncarnationReplacement = oldWindow.token.pid != newWindow.token.pid
             || oldWindowId == newWindowId
         let deliveries = resetFrameApplicationStateForRebind(
@@ -473,6 +586,18 @@ final class AXManager {
         )
         for delivery in deliveries {
             delivery.deliver()
+        }
+        if shouldReissuePark {
+            markParkPending(for: newWindowId, pid: newWindow.token.pid)
+            if let parkFrame {
+                applyParkFramesParallel([
+                    AXFrameApplicationTarget(
+                        pid: newWindow.token.pid,
+                        window: newWindow.axRef,
+                        frame: parkFrame
+                    )
+                ])
+            }
         }
         FrameApplyTrace.recordEvent(
             pid: newWindow.token.pid,
@@ -512,24 +637,17 @@ final class AXManager {
         if inactiveWorkspaceWindowIds.remove(oldWindowId) != nil {
             inactiveWorkspaceWindowIds.insert(newWindowId)
         }
-        if pendingParkWindowIds.remove(oldWindowId) != nil {
-            pendingParkWindowIds.insert(newWindowId)
-        }
-        if let seq = lastParkCommandSeqByWindowId.removeValue(forKey: oldWindowId) {
-            lastParkCommandSeqByWindowId[newWindowId] = seq
-        }
-        if let seq = lastFrameResultSeqByWindowId.removeValue(forKey: oldWindowId) {
-            lastFrameResultSeqByWindowId[newWindowId] = seq
-        }
     }
 
     private func resetIncarnationAuxiliaryState(oldWindowId: Int, newWindowId: Int) {
         pendingParkWindowIds.remove(oldWindowId)
         pendingParkWindowIds.remove(newWindowId)
-        lastParkCommandSeqByWindowId.removeValue(forKey: oldWindowId)
-        lastParkCommandSeqByWindowId.removeValue(forKey: newWindowId)
-        lastFrameResultSeqByWindowId.removeValue(forKey: oldWindowId)
-        lastFrameResultSeqByWindowId.removeValue(forKey: newWindowId)
+        pendingParkFrameRequestsByWindowId.removeValue(forKey: oldWindowId)
+        pendingParkFrameRequestsByWindowId.removeValue(forKey: newWindowId)
+        parkFrameTargetStatesByWindowId.removeValue(forKey: oldWindowId)
+        parkFrameTargetStatesByWindowId.removeValue(forKey: newWindowId)
+        parkPIDByWindowId.removeValue(forKey: oldWindowId)
+        parkPIDByWindowId.removeValue(forKey: newWindowId)
     }
 
     func confirmFrameWrite(for windowId: Int, frame: CGRect) {
@@ -537,19 +655,70 @@ final class AXManager {
         clearSkyLightLivePosition(for: windowId)
     }
 
-    func removeWindowState(pid: pid_t, windowId: Int) {
-        AppAXContext.contexts[pid]?.removeWindowState(windowId: windowId)
+    func removeWindowState(pid: pid_t, expectedWindow: AXWindowRef) {
+        let windowId = expectedWindow.windowId
+        cancelParkFrameJobs([(pid: pid, windowId: windowId)], reason: "removed")
+        AppAXContext.contexts[pid]?.prepareWindowRemoval(for: windowId)
+        let deliveries = takeRemovedWindowLedgerState(windowId: windowId)
+        AppAXContext.contexts[pid]?.removeWindowState(expectedWindow: expectedWindow)
+        for delivery in deliveries {
+            delivery.deliver()
+        }
+    }
 
+    func removeWindowLedgerState(pid: pid_t, windowId: Int) {
+        cancelParkFrameJobs([(pid: pid, windowId: windowId)], reason: "removed")
+        if let context = AppAXContext.contexts[pid] {
+            context.prepareWindowRemoval(for: windowId)
+            context.invalidateWindowIdentity()
+        }
+        let deliveries = takeRemovedWindowLedgerState(windowId: windowId)
+        for delivery in deliveries {
+            delivery.deliver()
+        }
+    }
+
+    private func takeRemovedWindowLedgerState(windowId: Int) -> [AXFrameTerminalDelivery] {
         let deliveries = frameLedger.removeWindowState(windowId: windowId)
         cancelPendingFrameRetry(for: windowId)
         inactiveWorkspaceWindowIds.remove(windowId)
         clearSkyLightLivePosition(for: windowId)
-        clearParkPending(for: windowId, pid: pid, reason: "removed")
-        lastParkCommandSeqByWindowId.removeValue(forKey: windowId)
-        lastFrameResultSeqByWindowId.removeValue(forKey: windowId)
 
-        for delivery in deliveries {
-            delivery.deliver()
+        return deliveries
+    }
+
+    private func clearParkFrameState(for pid: pid_t, reason: String) {
+        var windowIds = Set(
+            parkPIDByWindowId.compactMap { windowId, statePID in
+                statePID == pid ? windowId : nil
+            }
+        )
+        for (windowId, pending) in pendingParkFrameRequestsByWindowId
+            where pending.request.pid == pid
+        {
+            windowIds.insert(windowId)
+        }
+        for (windowId, targetState) in parkFrameTargetStatesByWindowId
+            where targetState.target.pid == pid
+        {
+            windowIds.insert(windowId)
+        }
+        cancelParkFrameJobs(
+            windowIds.map { (pid: pid, windowId: $0) },
+            reason: reason
+        )
+    }
+
+    private func destroyContextIfPresent(for pid: pid_t, reason: String) {
+        guard let context = AppAXContext.contexts[pid] else { return }
+        clearParkFrameState(for: pid, reason: reason)
+        context.destroy()
+    }
+
+    private func garbageCollectContexts() {
+        for (pid, context) in Array(AppAXContext.contexts) where context.nsApp.isTerminated {
+            clearParkFrameState(for: pid, reason: "context-garbage-collected")
+            context.destroy()
         }
     }
 
@@ -564,6 +733,10 @@ final class AXManager {
         }
 
         cancelAllPendingFrameState()
+        for state in managedWindowBindingRetryStateByPID.values {
+            state.task?.cancel()
+        }
+        managedWindowBindingRetryStateByPID.removeAll()
 
         AppAXContext.shutdownAll()
     }
@@ -600,6 +773,128 @@ final class AXManager {
         return []
     }
 
+    func ensureContext(for app: NSRunningApplication) async -> Bool {
+        guard shouldTrack(app) else { return false }
+        return (try? await AppAXContext.getOrCreate(app)) != nil
+    }
+
+    func bindManagedWindows(_ entries: [WindowState]) {
+        let windowsByPID = managedWindowsByPID(entries)
+        for (pid, windows) in windowsByPID {
+            submitManagedWindowBindings(
+                pid: pid,
+                windows: windows,
+                authoritative: false,
+                resetsRetryBudget: true
+            )
+        }
+    }
+
+    func reconcileManagedWindowBindings(_ entries: [WindowState]) {
+        let windowsByPID = managedWindowsByPID(entries)
+        let contextPIDs = Set(AppAXContext.contexts.keys)
+        for pid in Set(managedWindowBindingRetryStateByPID.keys)
+            where !contextPIDs.contains(pid) && windowsByPID[pid] == nil
+        {
+            clearManagedWindowBindingRetry(for: pid)
+        }
+        for pid in contextPIDs.union(windowsByPID.keys) {
+            let windows = windowsByPID[pid] ?? [:]
+            AppAXContext.contexts[pid]?.retainFrameState(only: Set(windows.keys))
+            submitManagedWindowBindings(
+                pid: pid,
+                windows: windows,
+                authoritative: true,
+                resetsRetryBudget: false
+            )
+        }
+    }
+
+    nonisolated static func managedWindowBindingRetryDelay(afterFailure failure: Int) -> Duration? {
+        switch failure {
+        case 1: .milliseconds(100)
+        case 2: .milliseconds(250)
+        case 3: .milliseconds(500)
+        default: nil
+        }
+    }
+
+    private func managedWindowsByPID(_ entries: [WindowState]) -> [pid_t: [Int: AXWindowRef]] {
+        var windowsByPID: [pid_t: [Int: AXWindowRef]] = [:]
+        windowsByPID.reserveCapacity(min(entries.count, 8))
+        for entry in entries {
+            windowsByPID[entry.pid, default: [:]][entry.windowId] = entry.axRef
+        }
+        return windowsByPID
+    }
+
+    private func submitManagedWindowBindings(
+        pid: pid_t,
+        windows: [Int: AXWindowRef],
+        authoritative: Bool,
+        resetsRetryBudget: Bool
+    ) {
+        let previousState = managedWindowBindingRetryStateByPID[pid]
+        previousState?.task?.cancel()
+        let generation = nextManagedWindowBindingGeneration
+        nextManagedWindowBindingGeneration &+= 1
+        managedWindowBindingRetryStateByPID[pid] = .init(
+            generation: generation,
+            failures: resetsRetryBudget ? 0 : previousState?.failures ?? 0,
+            task: nil
+        )
+        guard let context = AppAXContext.contexts[pid] else {
+            handleManagedWindowBindingResult(.retryRequired, pid: pid, generation: generation)
+            return
+        }
+        let completion: @MainActor @Sendable (AppAXWindowBindingResult) -> Void = { [weak self] in
+            self?.handleManagedWindowBindingResult($0, pid: pid, generation: generation)
+        }
+        if authoritative {
+            context.reconcileWindowBindings(windows, timeoutSeconds: perAppTimeout, completion: completion)
+        } else {
+            context.bindWindows(windows, timeoutSeconds: perAppTimeout, completion: completion)
+        }
+    }
+
+    private func handleManagedWindowBindingResult(
+        _ result: AppAXWindowBindingResult,
+        pid: pid_t,
+        generation: UInt64
+    ) {
+        guard var state = managedWindowBindingRetryStateByPID[pid],
+              state.generation == generation
+        else { return }
+        guard case .retryRequired = result else {
+            clearManagedWindowBindingRetry(for: pid)
+            return
+        }
+        state.failures += 1
+        guard let delay = managedWindowBindingRetryDelayProvider(state.failures) else {
+            managedWindowBindingRetryStateByPID[pid] = state
+            return
+        }
+        state.task = Task { @MainActor [weak self] in
+            do {
+                try await Task.sleep(for: delay)
+            } catch {
+                return
+            }
+            guard let self,
+                  var state = self.managedWindowBindingRetryStateByPID[pid],
+                  state.generation == generation
+            else { return }
+            state.task = nil
+            self.managedWindowBindingRetryStateByPID[pid] = state
+            self.onManagedWindowBindingFailed?()
+        }
+        managedWindowBindingRetryStateByPID[pid] = state
+    }
+
+    private func clearManagedWindowBindingRetry(for pid: pid_t) {
+        managedWindowBindingRetryStateByPID.removeValue(forKey: pid)?.task?.cancel()
+    }
+
     func requestPermission() -> Bool {
         if AccessibilityPermissionMonitor.shared.isGranted { return true }
 
@@ -609,17 +904,12 @@ final class AXManager {
         return AccessibilityPermissionMonitor.shared.isGranted
     }
 
-    func currentWindowsAsync() async -> [(AXWindowRef, pid_t, Int)] {
-        guard let snapshot = try? await fullRescanEnumerationSnapshot() else { return [] }
-        return snapshot.windows.map { ($0.axRef, $0.pid, $0.windowId) }
-    }
-
     func fullRescanEnumerationSnapshot(
         preservingPIDsByWindowId: [Int: pid_t] = [:],
         requiresTitleForApp: (String?, String?) -> Bool = { _, _ in false }
     ) async throws -> FullRescanEnumerationSnapshot {
         try Task.checkCancellation()
-        AppAXContext.garbageCollect()
+        garbageCollectContexts()
         let discoveryEvidence = fullRescanDiscoveryEvidence()
         let appTargets = fullRescanAppTargets(
             discoveryEvidence: discoveryEvidence,
@@ -1016,7 +1306,7 @@ final class AXManager {
     ) async throws -> Set<pid_t> {
         try Task.checkCancellation()
         var failedPIDs: Set<pid_t> = []
-        try await Self.forEachOneShotPromotionBatch(candidates) { pid, candidates in
+        try await Self.forEachOneShotPromotionBatch(candidates) { pid, _ in
             try Task.checkCancellation()
             guard let app = appsByPID[pid] else {
                 failedPIDs.insert(pid)
@@ -1028,30 +1318,20 @@ final class AXManager {
                 guard let context = try await AppAXContext.getOrCreate(app) else {
                     failedPIDs.insert(pid)
                     if !hadContext {
-                        AppAXContext.contexts[pid]?.destroy()
+                        destroyContextIfPresent(for: pid, reason: "promotion-failed")
                     }
                     return
                 }
                 callbackGeneration = context.callbackGeneration
-                guard try await context.bindWindowsAsync(
-                    candidates.map(\.axRef),
-                    timeoutSeconds: perAppTimeout
-                ) else {
-                    failedPIDs.insert(pid)
-                    if !hadContext {
-                        AppAXContext.contexts[pid]?.destroy()
-                    }
-                    return
-                }
             } catch is CancellationError {
                 if !hadContext {
-                    AppAXContext.contexts[pid]?.destroy()
+                    destroyContextIfPresent(for: pid, reason: "promotion-cancelled")
                 }
                 throw CancellationError()
             } catch {
                 failedPIDs.insert(pid)
                 if !hadContext {
-                    AppAXContext.contexts[pid]?.destroy()
+                    destroyContextIfPresent(for: pid, reason: "promotion-failed")
                 }
                 Self.recordFullRescanEnumerationFailure(
                     app,
@@ -1084,15 +1364,248 @@ final class AXManager {
     }
 
     func applyFramesParallel(
-        _ frames: [(pid: pid_t, windowId: Int, frame: CGRect)],
+        _ frames: [AXFrameApplicationTarget],
         terminalObserver: FrameApplicationTerminalObserver? = nil,
         verify: Bool = true
     ) {
         enqueueFrameApplications(frames, isRetry: false, verify: verify, terminalObserver: terminalObserver)
     }
 
+    func applyParkFramesParallel(_ frames: [AXFrameApplicationTarget]) {
+        dispatchParkFrameApplications(prepareParkFrameApplications(frames))
+    }
+
+    func pendingParkFrameRequest(for windowId: Int) -> AXFrameApplicationRequest? {
+        pendingParkFrameRequestsByWindowId[windowId]?.request
+    }
+
+    func verifiedParkFrame(for windowId: Int) -> CGRect? {
+        guard let state = parkFrameTargetStatesByWindowId[windowId],
+              state.isVerified
+        else {
+            return nil
+        }
+        return state.target.frame
+    }
+
+    func prepareParkFrameApplications(
+        _ frames: [AXFrameApplicationTarget]
+    ) -> [AXFrameApplicationRequest] {
+        var requests: [AXFrameApplicationRequest] = []
+        requests.reserveCapacity(frames.count)
+
+        for target in frames {
+            let windowId = target.windowId
+            parkPIDByWindowId[windowId] = target.pid
+
+            if let state = parkFrameTargetStatesByWindowId[windowId],
+               state.isVerified,
+               state.target.pid == target.pid,
+               sameAXWindowIdentity(state.target.expectedWindow, target.expectedWindow),
+               state.target.frame == target.frame
+            {
+                pendingParkWindowIds.remove(windowId)
+                continue
+            }
+            pendingParkWindowIds.insert(windowId)
+
+            if let pending = pendingParkFrameRequestsByWindowId[windowId] {
+                if pending.request.pid == target.pid,
+                   sameAXWindowIdentity(pending.request.expectedWindow, target.expectedWindow),
+                   pending.request.frame == target.frame
+                {
+                    continue
+                }
+                AppAXContext.contexts[pending.request.pid]?.cancelParkFrameJob(for: windowId)
+                pendingParkFrameRequestsByWindowId.removeValue(forKey: windowId)
+                FrameApplyTrace.recordEvent(
+                    pid: pending.request.pid,
+                    windowId: windowId,
+                    outcome: "outcome=ax-park-cancelled/superseded",
+                    target: pending.request.frame
+                )
+            }
+
+            parkFrameTargetStatesByWindowId[windowId] = ParkFrameTargetState(
+                target: target,
+                isVerified: false
+            )
+            let request = AXFrameApplicationRequest(
+                requestId: makeNextParkFrameRequestId(),
+                pid: target.pid,
+                windowId: windowId,
+                expectedWindow: target.expectedWindow,
+                frame: target.frame,
+                currentFrameHint: frameLedger.lastAppliedFrame(for: windowId),
+                verify: true
+            )
+            pendingParkFrameRequestsByWindowId[windowId] = PendingParkFrameRequest(
+                request: request,
+                retriesRemaining: 1
+            )
+            requests.append(request)
+        }
+
+        return requests.filter {
+            pendingParkFrameRequestsByWindowId[$0.windowId]?.request.requestId == $0.requestId
+        }
+    }
+
+    func processParkFrameApplyResults(
+        _ results: [AXFrameApplyResult]
+    ) -> [AXFrameApplicationRequest] {
+        var retries: [AXFrameApplicationRequest] = []
+        retries.reserveCapacity(results.count)
+
+        for result in results {
+            let windowId = result.windowId
+            guard let pending = pendingParkFrameRequestsByWindowId[windowId],
+                  pending.request.requestId == result.requestId,
+                  pending.request.pid == result.pid,
+                  sameAXWindowIdentity(pending.request.expectedWindow, result.expectedWindow),
+                  pending.request.frame == result.targetFrame
+            else {
+                continue
+            }
+
+            pendingParkFrameRequestsByWindowId.removeValue(forKey: windowId)
+            let failureReason = parkFrameFailureReason(for: result)
+            guard let failureReason else {
+                parkFrameTargetStatesByWindowId[windowId] = ParkFrameTargetState(
+                    target: AXFrameApplicationTarget(
+                        pid: result.pid,
+                        window: result.expectedWindow,
+                        frame: result.targetFrame
+                    ),
+                    isVerified: true
+                )
+                parkPIDByWindowId[windowId] = result.pid
+                pendingParkWindowIds.remove(windowId)
+                FrameApplyTrace.shared.record(
+                    .init(
+                        timestamp: Date(),
+                        pid: result.pid,
+                        windowId: windowId,
+                        outcome: "outcome=ax-park-confirmed",
+                        target: result.targetFrame,
+                        hint: result.currentFrameHint,
+                        observed: result.writeResult.observedFrame,
+                        confirmed: result.writeResult.observedFrame
+                    )
+                )
+                continue
+            }
+
+            if failureReason == .cancelled {
+                FrameApplyTrace.recordEvent(
+                    pid: result.pid,
+                    windowId: windowId,
+                    outcome: "outcome=ax-park-cancelled/cancelled",
+                    target: result.targetFrame
+                )
+                continue
+            }
+
+            FrameApplyTrace.shared.record(
+                .init(
+                    timestamp: Date(),
+                    pid: result.pid,
+                    windowId: windowId,
+                    outcome: "outcome=ax-park-failed/\(failureReason.traceDescription)",
+                    target: result.targetFrame,
+                    hint: result.currentFrameHint,
+                    observed: result.writeResult.observedFrame,
+                    confirmed: nil
+                )
+            )
+            guard pending.retriesRemaining > 0,
+                  pendingParkWindowIds.contains(windowId)
+            else {
+                continue
+            }
+
+            let retry = AXFrameApplicationRequest(
+                requestId: makeNextParkFrameRequestId(),
+                pid: pending.request.pid,
+                windowId: windowId,
+                expectedWindow: pending.request.expectedWindow,
+                frame: pending.request.frame,
+                currentFrameHint: pending.request.currentFrameHint,
+                verify: true
+            )
+            pendingParkFrameRequestsByWindowId[windowId] = PendingParkFrameRequest(
+                request: retry,
+                retriesRemaining: pending.retriesRemaining - 1
+            )
+            retries.append(retry)
+        }
+
+        return retries
+    }
+
+    func handleParkFrameApplyResults(_ results: [AXFrameApplyResult]) {
+        dispatchParkFrameApplications(processParkFrameApplyResults(results))
+    }
+
+    private func dispatchParkFrameApplications(_ requests: [AXFrameApplicationRequest]) {
+        guard !requests.isEmpty else { return }
+        var requestsByPID: [pid_t: [AXFrameApplicationRequest]] = [:]
+        requestsByPID.reserveCapacity(min(requests.count, 8))
+        for request in requests {
+            requestsByPID[request.pid, default: []].append(request)
+        }
+
+        for (pid, appFrames) in requestsByPID {
+            guard let context = AppAXContext.contexts[pid] else {
+                handleParkFrameApplyResults(
+                    appFrames.map {
+                        AXFrameApplyResult(
+                            requestId: $0.requestId,
+                            pid: $0.pid,
+                            windowId: $0.windowId,
+                            expectedWindow: $0.expectedWindow,
+                            targetFrame: $0.frame,
+                            currentFrameHint: $0.currentFrameHint,
+                            writeResult: .skipped(
+                                targetFrame: $0.frame,
+                                currentFrameHint: $0.currentFrameHint,
+                                failureReason: .contextUnavailable
+                            )
+                        )
+                    }
+                )
+                continue
+            }
+            context.setParkFramesBatch(appFrames) { [weak self] results in
+                self?.handleParkFrameApplyResults(results)
+            }
+        }
+    }
+
+    private func parkFrameFailureReason(for result: AXFrameApplyResult) -> AXFrameWriteFailureReason? {
+        if let failureReason = result.writeResult.failureReason {
+            return failureReason
+        }
+        guard let observedFrame = result.writeResult.observedFrame else {
+            return .readbackFailed
+        }
+        guard observedFrame.approximatelyEqual(
+            to: result.targetFrame,
+            tolerance: FrameTolerance.frameWrite
+        ) else {
+            return .verificationMismatch
+        }
+        return nil
+    }
+
+    private func makeNextParkFrameRequestId() -> AXFrameRequestId {
+        let requestId = nextParkFrameRequestId
+        nextParkFrameRequestId &+= 1
+        return requestId
+    }
+
     private func enqueueFrameApplications(
-        _ frames: [(pid: pid_t, windowId: Int, frame: CGRect)],
+        _ frames: [AXFrameApplicationTarget],
         isRetry: Bool,
         verify: Bool = true,
         terminalObserver: FrameApplicationTerminalObserver? = nil
@@ -1128,7 +1641,7 @@ final class AXManager {
     }
 
     private func enqueueFrameApplicationsUsingBuffer(
-        _ frames: [(pid: pid_t, windowId: Int, frame: CGRect)],
+        _ frames: [AXFrameApplicationTarget],
         isRetry: Bool,
         verify: Bool,
         terminalObserver: FrameApplicationTerminalObserver?,
@@ -1137,13 +1650,17 @@ final class AXManager {
         framesByPid.reserveCapacity(min(frames.count, 8))
         var deferredDeliveries: [AXFrameTerminalDelivery] = []
 
-        for (pid, windowId, frame) in frames {
+        for target in frames {
+            let pid = target.pid
+            let windowId = target.windowId
+            let frame = target.frame
             if inactiveWorkspaceWindowIds.contains(windowId) {
                 continue
             }
             let decision = frameLedger.prepareFrameApplication(
                 pid: pid,
                 windowId: windowId,
+                expectedWindow: target.expectedWindow,
                 frame: frame,
                 isRetry: isRetry,
                 verify: verify,
@@ -1169,6 +1686,7 @@ final class AXManager {
                             requestId: $0.requestId,
                             pid: pid,
                             windowId: $0.windowId,
+                            expectedWindow: $0.expectedWindow,
                             targetFrame: $0.frame,
                             currentFrameHint: $0.currentFrameHint,
                             writeResult: .skipped(
@@ -1203,6 +1721,48 @@ final class AXManager {
         }
     }
 
+    @discardableResult
+    func cancelParkFrameJobs(
+        _ entries: [(pid: pid_t, windowId: Int)],
+        reason: String = "shown"
+    ) -> Set<WindowToken> {
+        var requiresVisibleAXTokens: Set<WindowToken> = []
+        for (pid, windowId) in uniqueFrameEntries(entries) {
+            let pending = pendingParkFrameRequestsByWindowId.removeValue(forKey: windowId)
+            let targetState = parkFrameTargetStatesByWindowId.removeValue(forKey: windowId)
+            let statePID = pending?.request.pid ?? targetState?.target.pid ?? parkPIDByWindowId[windowId] ?? pid
+            let target = pending?.request.frame ?? targetState?.target.frame
+            let hadState = pendingParkWindowIds.remove(windowId) != nil
+                || pending != nil
+                || targetState != nil
+                || parkPIDByWindowId[windowId] != nil
+            parkPIDByWindowId.removeValue(forKey: windowId)
+            if let pending {
+                requiresVisibleAXTokens.insert(
+                    WindowToken(pid: pending.request.pid, windowId: windowId)
+                )
+            }
+            if let targetState, !targetState.isVerified {
+                requiresVisibleAXTokens.insert(
+                    WindowToken(pid: targetState.target.pid, windowId: windowId)
+                )
+            }
+            AppAXContext.contexts[pid]?.cancelParkFrameJob(for: windowId)
+            if statePID != pid {
+                AppAXContext.contexts[statePID]?.cancelParkFrameJob(for: windowId)
+            }
+            if hadState {
+                FrameApplyTrace.recordEvent(
+                    pid: statePID,
+                    windowId: windowId,
+                    outcome: "outcome=ax-park-cancelled/\(reason)",
+                    target: target
+                )
+            }
+        }
+        return requiresVisibleAXTokens
+    }
+
     func suppressFrameWrites(_ entries: [(pid: pid_t, windowId: Int)]) {
         var deliveries: [AXFrameTerminalDelivery] = []
         let entries = uniqueFrameEntries(entries)
@@ -1221,12 +1781,12 @@ final class AXManager {
 
     func unsuppressFrameWrites(_ entries: [(pid: pid_t, windowId: Int)]) {
         let entries = uniqueFrameEntries(entries)
+        cancelParkFrameJobs(entries, reason: "shown")
         for (pid, windowIds) in groupedWindowIdsByPid(entries) {
             AppAXContext.contexts[pid]?.unsuppressFrameWrites(for: windowIds)
         }
-        for (pid, windowId) in entries {
+        for (_, windowId) in entries {
             clearSkyLightLivePosition(for: windowId)
-            clearParkPending(for: windowId, pid: pid, reason: "shown")
         }
     }
 
@@ -1243,17 +1803,25 @@ final class AXManager {
     }
 
     func applyPositionsViaSkyLight(
-        _ positions: [(windowId: Int, origin: CGPoint)],
+        _ positions: [(windowId: Int, frame: CGRect)],
         allowInactive: Bool = false
     ) {
         let filtered = allowInactive
             ? positions
             : positions.filter { !inactiveWorkspaceWindowIds.contains($0.windowId) }
         guard !filtered.isEmpty else { return }
-        let batchPositions = filtered.map {
-            (windowId: UInt32($0.windowId), origin: ScreenCoordinateSpace.toWindowServer(point: $0.origin))
+        SkyLight.shared.batchMoveWindows(Self.windowServerPositions(filtered))
+    }
+
+    static func windowServerPositions(
+        _ positions: [(windowId: Int, frame: CGRect)]
+    ) -> [(windowId: UInt32, origin: CGPoint)] {
+        positions.map {
+            (
+                windowId: UInt32($0.windowId),
+                origin: ScreenCoordinateSpace.toWindowServer(rect: $0.frame).origin
+            )
         }
-        SkyLight.shared.batchMoveWindows(batchPositions)
     }
 
     private func shouldTrack(_ app: NSRunningApplication) -> Bool {
@@ -1368,7 +1936,12 @@ final class AXManager {
                 outcome: "outcome=retry-scheduled",
                 target: retry.frame
             )
-            scheduleFrameRetry(pid: retry.pid, windowId: retry.windowId, frame: retry.frame)
+            scheduleFrameRetry(
+                pid: retry.pid,
+                windowId: retry.windowId,
+                expectedWindow: retry.expectedWindow,
+                frame: retry.frame
+            )
         }
         for delivery in outcome.deliveries {
             delivery.deliver()
@@ -1385,15 +1958,23 @@ final class AXManager {
     }
 
     func handleAcceptedFrameApplySuccess(_ result: AXFrameApplyResult) {
-        frameOrderSeq &+= 1
-        lastFrameResultSeqByWindowId[result.windowId] = frameOrderSeq
         if isWindowParked?(result.windowId) == true {
-            markParkPending(for: result.windowId, pid: result.pid)
+            markParkPending(
+                for: result.windowId,
+                pid: result.pid,
+                target: nil,
+                cancellationReason: "ordinary-write"
+            )
         }
-        onFrameApplySucceeded?(result.windowId)
+        onFrameApplySucceeded?(result)
     }
 
-    private func scheduleFrameRetry(pid: pid_t, windowId: Int, frame: CGRect) {
+    private func scheduleFrameRetry(
+        pid: pid_t,
+        windowId: Int,
+        expectedWindow: AXWindowRef,
+        frame: CGRect
+    ) {
         cancelPendingFrameRetry(for: windowId)
         let generation = nextFrameRetryGeneration
         nextFrameRetryGeneration &+= 1
@@ -1405,7 +1986,19 @@ final class AXManager {
             guard !self.frameLedger.hasPendingFrameWrite(for: currentWindowId) else { return }
             self.pendingFrameRetryGenerationByWindowId.removeValue(forKey: currentWindowId)
             self.pendingFrameRetryTasksByWindowId.removeValue(forKey: currentWindowId)
-            self.enqueueFrameApplications([(pid, currentWindowId, frame)], isRetry: true)
+            self.enqueueFrameApplications(
+                [
+                    AXFrameApplicationTarget(
+                        pid: pid,
+                        window: AXWindowRef(
+                            element: expectedWindow.element,
+                            windowId: currentWindowId
+                        ),
+                        frame: frame
+                    )
+                ],
+                isRetry: true
+            )
         }
     }
 
@@ -1421,6 +2014,13 @@ final class AXManager {
     }
 
     private func cancelAllPendingFrameState() {
+        let parkEntries = parkPIDByWindowId.map { (pid: $0.value, windowId: $0.key) }
+        cancelParkFrameJobs(parkEntries, reason: "shutdown")
+        pendingParkWindowIds.removeAll()
+        pendingParkFrameRequestsByWindowId.removeAll()
+        parkFrameTargetStatesByWindowId.removeAll()
+        parkPIDByWindowId.removeAll()
+
         for (_, task) in pendingFrameRetryTasksByWindowId {
             task.cancel()
         }

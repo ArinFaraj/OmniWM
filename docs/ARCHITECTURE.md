@@ -433,7 +433,7 @@ There is one deliberate exception to "all mutation goes through commit": **per-f
 | `axEventHandler` | CGS/AX events → admissions, focus confirm/retry, native-fullscreen detection |
 | `commandHandler` | Routes physical `HotkeyInvocation`s through Overview first, then routes inactive-Overview commands with layout-compatibility guards |
 | `mouseEventHandler` / `mouseWarpHandler` | CGEvent tap, focus-follows-mouse, gestures; cursor warp |
-| `workspaceNavigationHandler` | Workspace switching, explicit-handle window workspace/monitor transfers, and Niri whole-column workspace transfers |
+| `workspaceNavigationHandler` | Workspace switching, directional whole-workspace monitor moves, explicit-handle window workspace/monitor transfers, and Niri whole-column workspace transfers |
 | `windowActionHandler` | Close, fullscreen, float toggle |
 | `serviceLifecycleManager` | Observer setup, permission polling, service start/stop |
 | `layoutRefreshController` | Refresh scheduling, the display-link loop, frame application (owns `niriLayoutHandler`/`dwindleLayoutHandler`) |
@@ -491,11 +491,11 @@ struct WindowState: Equatable {
 
 The focus session (`FocusSessionSnapshot`) and per-monitor visible-workspace state (`MonitorSession`) are value types defined in `Core/Reconcile/ReconcileSnapshot.swift` and held on `WorldStore`. There is no single `SessionState` type.
 
-### 4.3 Niri Layout Engine (Scrolling Columns)
+### 4.3 Niri Layout Engine (Orientation-Aware Scrolling Containers)
 
 **Directory:** `Sources/OmniWM/Core/Layout/Niri/` (~31 files)
 
-Niri arranges windows in vertical columns that scroll horizontally, inspired by the [Niri](https://github.com/YaLTeR/niri) Wayland compositor.
+Niri arranges containers along the monitor's primary axis, inspired by the [Niri](https://github.com/YaLTeR/niri) Wayland compositor. In horizontal orientation, vertical columns scroll left and right and their windows stack vertically. In vertical orientation, horizontal rows scroll up and down and their windows span left to right.
 
 ```
 NiriRoot (per workspace)
@@ -513,17 +513,17 @@ NiriRoot (per workspace)
 |------|---------|
 | `NiriLayoutEngine` | Owns per-workspace `NiriWorkspaceState` values with local roots and `nodesByToken` indexes, per-monitor `NiriMonitor` state, axis-solve cache, config. |
 | `NiriRoot` | Per-workspace container; cached columns / all-windows / id set. |
-| `NiriContainer` | A column: `displayMode` (`.normal`/`.tabbed`), `width: ProportionalSize`, `activeTileIdx`, width/move springs. |
-| `NiriWindow` | Leaf: `token`, `SizingMode` (`.normal`/`.maximized`/`.fullscreen`), `height: WeightedSize`, constraints, move animations. |
-| `ProportionalSize` | `.proportion(CGFloat)` or `.fixed(CGFloat)` — column width. |
-| `WeightedSize` | `.auto(weight:)` or `.fixed(CGFloat)` — window height within a column. |
+| `NiriContainer` | A primary-axis container: `displayMode` (`.normal`/`.tabbed`), horizontal `width` state, vertical `height` state, `activeTileIdx`, and move/width springs. |
+| `NiriWindow` | Leaf: `token`, `SizingMode` (`.normal`/`.maximized`/`.fullscreen`), horizontal-orientation `height`, vertical-orientation `windowWidth`, constraints, and move animations. |
+| `ProportionalSize` | `.proportion(CGFloat)` or `.fixed(CGFloat)` — a container's primary span. |
+| `WeightedSize` | `.auto(weight:)`, `.fixed(CGFloat)`, or `.preset(Int)` — a window's secondary span within its container. |
 | `ViewportState` | Per-workspace scroll/selection snapshot. **Stored in `WorldStore.viewports`**, passed into `calculateLayout`. |
 
-**Layout computation** lives in `NiriLayout.swift` (`calculateLayout(...) -> [WindowToken: CGRect]`). **Constraint solving** is `NiriAxisSolver` in `NiriConstraintSolver.swift` — a pure 1-D solver distributing span across weighted windows while honoring min/max/fixed constraints, memoized in the engine's axis-solve cache.
+**Layout computation** lives in `NiriLayout.swift` (`calculateLayout(...) -> [WindowToken: CGRect]`). Monitor orientation selects the primary scroll axis and secondary window-distribution axis before frame calculation. **Constraint solving** is `NiriAxisSolver` in `NiriConstraintSolver.swift` — a pure 1-D solver distributing span across weighted windows while honoring min/max/fixed constraints, memoized in the engine's axis-solve cache.
 
 **File organization.** The core engine is split across `NiriLayoutEngine.swift` plus twelve `NiriLayoutEngine+*.swift` extensions (`+Animation`, `+ColumnOps`, `+Monitors`, `+Sizing`, `+TabbedMode`, `+WindowOps`, `+Windows`, `+WorkspaceOps`, `+InteractiveMove`, `+InteractiveResize`, …), with navigation in `NiriNavigation.swift`, the node tree in `NiriNode.swift`, viewport math in `ViewportState.swift` (+4 extensions), and overlays for interactive move/resize, drag ghost, and swap targets. Tabbed Niri columns and grouped Dwindle tiles share the surface-layer `TabRailManager`.
 
-**Interactive move/resize.** Option+Shift+drag moves windows between columns; `DragGhostController` captures a ScreenCaptureKit thumbnail shown as a translucent ghost and `SwapTargetOverlay` highlights the drop target. Edge-dragging resizes column widths / window heights.
+**Interactive move/resize.** Option+Shift+drag moves windows between containers; `DragGhostController` captures a ScreenCaptureKit thumbnail shown as a translucent ghost and `SwapTargetOverlay` highlights the drop target. Edge-dragging resizes the container on the primary axis and the selected window on the secondary axis. Each interaction captures its orientation at begin and keeps that axis ownership through update and completion.
 
 ### 4.4 Dwindle Layout Engine (BSP)
 
@@ -600,13 +600,13 @@ Focus management is split across several objects (there is no single coordinator
 
 **Hotkeys** (`Sources/OmniWM/Core/Input/`)
 
-`ActionCatalog` is the source of truth for bindable actions. `buildSpecs()` materializes **149** `ActionSpec`s (95 standalone actions + 6 loop templates × 9), each with a title, search keywords, category, layout compatibility, and default binding. `HotkeyBinding`/`HotkeyBindingRegistry` persist and canonicalize per-action bindings (an action can have several shortcuts).
+`ActionCatalog` is the source of truth for bindable actions. `buildSpecs()` materializes **153** `ActionSpec`s (99 standalone actions + 6 loop templates × 9), each with a title, search keywords, category, layout compatibility, and default binding. `HotkeyBinding`/`HotkeyBindingRegistry` persist and canonicalize per-action bindings (an action can have several shortcuts).
 
 `HotkeyCenter` (`Hotkeys.swift`) installs one Carbon `InstallEventHandler` and registers each binding via `RegisterEventHotKey`, plus a virtual-hyper synthesis path. On a press it emits a `HotkeyInvocation` through `onCommand`; the invocation carries the semantic `HotkeyCommand` and optional `PhysicalHotkeyTrigger` metadata (`keyCode`, modifiers, and repeat state). `WMController` wires it to `eventIntake.enqueue(.hotkeyInvocation(invocation))`, so physical commands enter the same ordered intake pipeline as everything else (falling back to `CommandHandler.handleHotkeyInvocation` only if intake is closed).
 
 **Command routing** (`Core/Controller/CommandHandler.swift`). `handleHotkeyInvocation` gives `OverviewController` first refusal while Overview is open. The modal router uses physical keys for Escape, Enter, and non-repeating Command-W, recognizes the configured physical Overview toggle, and routes assigned structural commands against the selected Overview `WindowHandle`; recognized no-ops are consumed. Unsupported commands and triggerless external/IPC commands remain blocked. When Overview is inactive, `performCommand` enforces `isEnabled` and the **layout-compatibility guard**: a `.niri`-only command is ignored under Dwindle and vice versa (`.shared` commands work everywhere).
 
-**Mouse events** (`Core/Controller/MouseEventHandler.swift`). A `CGEventTap` drives focus-follows-mouse (debounced) and interactive move/resize, while raw multitouch frames (`MultitouchGestureSource`) drive trackpad swipes through one idle→armed→committed state machine with two routed modes: Niri viewport column scrolling (horizontal) and one-shot workspace switching (`TrackpadGestureIntent` resolves the mode from finger count and dominant axis; the switch fires through the same `switchWorkspaceRelative` seam as hotkeys, targeting the monitor under the cursor). Transient mouse events are coalesced *in the intake* before draining.
+**Mouse events** (`Core/Controller/MouseEventHandler.swift`). A `CGEventTap` drives focus-follows-mouse (debounced) and interactive move/resize, while raw multitouch frames (`MultitouchGestureSource`) drive trackpad swipes through one idle→armed→committed state machine with two routed modes: Niri viewport container scrolling on the active monitor's configured orientation axis and one-shot workspace switching (`TrackpadGestureIntent` resolves the mode from finger count and dominant axis; the switch fires through the same `switchWorkspaceRelative` seam as hotkeys, targeting the monitor under the cursor). A committed viewport gesture retains its resolved axis for the rest of the gesture. Transient mouse events are coalesced *in the intake* before draining.
 
 **SkyLight events** (`Core/SkyLight/CGSEventObserver.swift`). Registers for window-server notifications and posts them into the intake:
 
@@ -647,12 +647,12 @@ struct WindowDecision {
 }
 ```
 
-Per-app `initialColumnWidth` is an admission hint, not an ongoing `ManagedWindowRuleEffects` constraint.
+Per-app `initialContainerPrimarySpan` is an admission hint, not an ongoing `ManagedWindowRuleEffects` constraint.
 `WindowRuleEngine` takes it only from the single winning rule, and Niri consumes it once when a resizable
-window creates or claims a new column. Niri owns that initial column seed before its normal width fallback;
+window creates or claims a new container. Niri owns that initial primary-span seed before its normal fallback;
 Dwindle ignores it, restored placement takes precedence, and later resize or relayout operations do not
-reassert the rule value. Single Window Fit retains visual precedence for a lone window, while `minWidth`
-clamps the resolved pixel width without mutating the stored initial proportion.
+reassert the rule value. Single Window Fit retains visual precedence for a lone window, while physical
+minimum-size constraints can clamp the resolved span without mutating the stored initial proportion.
 
 ### 4.8 IPC System
 
@@ -733,12 +733,12 @@ Native fullscreen is co-driven by two observed facts: (1) SkyLight fullscreen-sp
 
 **Directory:** `Sources/OmniWM/Core/Animation/`
 
-- **`SpringAnimation` / `SpringConfig`** — a closed-form damped-spring solver sampled by absolute `CACurrentMediaTime`. `offsetBy(_:)` rebases both endpoints so the world can re-anchor a viewport mid-flight. The named presets (`niriHorizontalViewMovement`, `niriWindowMovement`, `niriWindowResize`, and the `snappy`/`balanced`/`gentle`/`reducedMotion`/`default` aliases) are all the same critically-damped curve (`dampingRatio 1.0`, `stiffness 800`); `resolvedForReduceMotion` is currently a no-op.
+- **`SpringAnimation` / `SpringConfig`** — a closed-form damped-spring solver sampled by absolute `CACurrentMediaTime`. `offsetBy(_:)` rebases both endpoints so the world can re-anchor a viewport mid-flight. The named presets (`niriHorizontalViewMovement`, `niriWindowMovement`, `niriWindowResize`, and the `snappy`/`balanced`/`gentle`/`default` aliases) all use the same critically-damped curve (`dampingRatio 1.0`, `stiffness 800`).
 - **`CubicAnimation`** — cubic-bezier easing used by the Dwindle path.
 - **`AnimationDriver`** — owns the per-workspace **viewport scroll motion only** (gesture or spring). It is seeded from inside the commit path (`reconcileViewportCommit` re-seeds the spring from a committed `ViewportState` transition) and sampled per frame by `NiriLayoutHandler`. Per-window/column animations live in the Niri engine, not here.
 - **`SwipeTracker`** — accumulates trackpad deltas over a 150ms window and projects an inertial throw target that a spring snaps to.
 - **`AnimationClock`** — a monotonic accumulating clock over `CACurrentMediaTime`, held by the engines and `WMController`.
-- **`MotionPolicy`** — a `@MainActor @Observable` single boolean (`animationsEnabled`) seeded from settings; it gates non-gesture scroll animations. It does **not** read the OS reduce-motion setting (that is consulted separately in UI views).
+- **`MotionPolicy`** — a `@MainActor @Observable` single boolean (`animationsEnabled`) seeded from settings; it gates OmniWM-authored animations.
 
 The per-frame **display link** is owned by `LayoutRefreshController` (not by `Animation/`); see [3.9](#39-the-ungated-animation-tier).
 
@@ -760,7 +760,7 @@ The per-frame **display link** is owned by `LayoutRefreshController` (not by `An
 | **Hidden Bar** | `UI/HiddenBar/HiddenBarController.swift` | Per-app menu-bar concealment coordinated through an isolated assessment-mode assertion, AX item discovery and icon capture, and a hidden-items panel. Unbundled launches use a separate fallback app icon. |
 | **Status Bar** | `UI/StatusBar/StatusBarController.swift` | Menu-bar icon, settings access, manual update checks. |
 | **Scratchpad** | `Core/Workspace/WorkspaceManager.swift` | Single transient window (`scratchpadToken` on `WorldStore`); show/hide coordinated by `WMController`. |
-| **Monitors** | `Core/Monitor/` | Display detection (`Monitor.current()`), stable identity (`OutputId`), and `MonitorRestoreAssignments` (re-maps saved per-monitor workspaces after a topology change by displayId then geometry/name best-match). Orientation reported over IPC is the **effective** orientation (`settings.effectiveOrientation` — override or auto). |
+| **Monitors** | `Core/Monitor/` | Display detection (`Monitor.current()`), UUID-first durable identity (`OutputId`), and `MonitorRestoreAssignments` (re-maps saved per-monitor workspaces by unique display UUID, then uses runtime ID/name only for UUID-less displays before geometry/name best-match). Duplicate live UUID claims fail closed to session-only runtime identity. Orientation reported over IPC is the **effective** orientation (`settings.effectiveOrientation` — override or auto). |
 | **Sleep / Lock** | `Core/Sleep/`, `Core/LockScreen/` | `SleepPreventionManager` (IOPM assertion), `LockScreenObserver` (DistributedNotificationCenter lock/unlock). |
 | **Release Updater** | `App/UpdateCoordinator.swift` | Polls the latest GitHub release once per day, supports manual checks, shows a release-notes popup. |
 
@@ -958,7 +958,7 @@ CLIRenderer displays the result
 | `NativeFullscreenRecord` | Per-window record (`originalToken`, `currentToken`, `workspaceId`, `exitRequestedByCommand`, `transition`) from which `isAppFullscreenActive` is derived. |
 | `AnimationDriver` | Owns per-workspace viewport scroll motion (gesture/spring). |
 | `SpringConfig` | Spring parameters; presets are all the same critically-damped curve. |
-| `MotionPolicy` | Single-boolean animations-enabled gate (does not read OS reduce-motion). |
+| `MotionPolicy` | Settings-backed gate for OmniWM-authored animations. |
 | `HotkeyCommand` | Enum of every command that can be triggered by hotkey or IPC; carries `LayoutCompatibility`. |
 | `WindowDecision` | Rule-evaluation result: `disposition`, `source`, `workspaceName`, `ruleEffects`. |
 

@@ -6,6 +6,7 @@ import SwiftUI
 struct SettingsView: View {
     @Bindable var settings: SettingsStore
     @Bindable var controller: WMController
+    @Bindable var windowCornerPreferences: GlobalWindowCornerPreferences
     let updateCoordinator: (any AppUpdateCoordinating)?
     let navigation: SettingsNavigationModel
     @State private var selectedSection: SettingsSection = .general
@@ -21,6 +22,7 @@ struct SettingsView: View {
                 section: selectedSection,
                 settings: settings,
                 controller: controller,
+                windowCornerPreferences: windowCornerPreferences,
                 updateCoordinator: updateCoordinator,
                 navigation: navigation
             )
@@ -42,6 +44,7 @@ struct SettingsView: View {
 struct GeneralSettingsTab: View {
     @Bindable var settings: SettingsStore
     @Bindable var controller: WMController
+    @Bindable var windowCornerPreferences: GlobalWindowCornerPreferences
     let updateCoordinator: (any AppUpdateCoordinating)?
 
     @State private var selectedGapMonitor: Monitor.ID?
@@ -68,6 +71,8 @@ struct GeneralSettingsTab: View {
 
                 Toggle("Enable Animations", isOn: animationsEnabled)
                 SettingsCaption("Turns OmniWM-authored animations on or off live without relaunching.")
+
+                AppWindowCornerSettings(preferences: windowCornerPreferences)
             }
 
             Section("Status Bar") {
@@ -101,29 +106,47 @@ struct GeneralSettingsTab: View {
                 )
             }
 
+            MonitorScopeSection(
+                selectedMonitor: $selectedGapMonitor,
+                monitors: connectedMonitors,
+                hasOverrides: { settings.gapSettings(for: $0) != nil },
+                reset: { monitor in
+                    settings.removeGapSettings(for: monitor)
+                    controller.updateMonitorGapSettings()
+                }
+            )
+
             Section("Layout") {
-                SettingsSliderRow(
-                    label: "Inner Gaps",
-                    value: $settings.gapSize,
-                    range: 0 ... 32,
-                    step: 1,
-                    valueText: "\(Int(settings.gapSize)) px",
-                    valueWidth: 64
-                )
-                .onChange(of: settings.gapSize) { _, newValue in
-                    controller.setGapSize(newValue)
+                if let monitorId = selectedGapMonitor,
+                   let monitor = connectedMonitors.first(where: { $0.id == monitorId })
+                {
+                    OverridableSlider(
+                        label: "Inner Gaps",
+                        value: settings.gapSettings(for: monitor)?.innerGap,
+                        globalValue: settings.gapSize,
+                        range: 0 ... 32,
+                        step: 1,
+                        formatter: { "\(Int($0)) px" },
+                        onChange: { value in updateGapSetting(for: monitor) { $0.innerGap = value } },
+                        onReset: { updateGapSetting(for: monitor) { $0.innerGap = nil } }
+                    )
+                    SettingsCaption("Overrides the global inner gap for \(monitor.name).")
+                } else {
+                    SettingsSliderRow(
+                        label: "Inner Gaps",
+                        value: $settings.gapSize,
+                        range: 0 ... 32,
+                        step: 1,
+                        valueText: "\(Int(settings.gapSize)) px",
+                        valueWidth: 64
+                    )
+                    .onChange(of: settings.gapSize) { _, newValue in
+                        controller.setGapSize(newValue)
+                    }
                 }
             }
 
             Section("Outer Margins") {
-                Picker("Configure", selection: $selectedGapMonitor) {
-                    Text("Global Defaults").tag(nil as Monitor.ID?)
-                    ForEach(connectedMonitors, id: \.id) { monitor in
-                        Text(monitor.isMain ? "\(monitor.name) (Main)" : monitor.name)
-                            .tag(monitor.id as Monitor.ID?)
-                    }
-                }
-
                 if let monitorId = selectedGapMonitor,
                    let monitor = connectedMonitors.first(where: { $0.id == monitorId })
                 {
@@ -230,13 +253,10 @@ struct GeneralSettingsTab: View {
 
     private func updateGapSetting(for monitor: Monitor, _ update: (inout MonitorGapSettings) -> Void) {
         var ms = settings.gapSettings(for: monitor) ?? MonitorGapSettings(
-            monitorName: monitor.name,
-            monitorDisplayId: monitor.displayId
+            monitorName: monitor.name
         )
-        ms.monitorName = monitor.name
-        ms.monitorDisplayId = monitor.displayId
         update(&ms)
-        settings.updateGapSettings(ms)
+        settings.updateGapSettings(ms, for: monitor)
         controller.updateMonitorGapSettings()
     }
 }
@@ -287,41 +307,42 @@ private struct GlobalNiriSettingsSection: View {
     @Bindable var controller: WMController
 
     var body: some View {
-        let useAutoDefaultColumnWidth = Binding(
-            get: { settings.niriDefaultColumnWidth == nil },
+        let useAutoDefaultContainerPrimarySpan = Binding(
+            get: { settings.niriDefaultContainerPrimarySpan == nil },
             set: { useAuto in
-                settings.niriDefaultColumnWidth = useAuto ? nil : (settings.niriDefaultColumnWidth ?? 0.5)
-                controller.updateNiriConfig(defaultColumnWidth: settings.niriDefaultColumnWidth)
+                settings
+                    .niriDefaultContainerPrimarySpan = useAuto ? nil : (settings.niriDefaultContainerPrimarySpan ?? 0.5)
+                controller.updateNiriConfig(defaultContainerPrimarySpan: settings.niriDefaultContainerPrimarySpan)
                 controller.balanceNiriSizesAllWorkspaces()
             }
         )
-        let defaultColumnWidthPercent = Binding(
-            get: { Int((settings.niriDefaultColumnWidth ?? 0.5) * 100) },
+        let defaultContainerPrimarySpanPercent = Binding(
+            get: { Int((settings.niriDefaultContainerPrimarySpan ?? 0.5) * 100) },
             set: { newPercent in
-                settings.niriDefaultColumnWidth = Double(min(100, max(5, newPercent))) / 100.0
-                controller.updateNiriConfig(defaultColumnWidth: settings.niriDefaultColumnWidth)
+                settings.niriDefaultContainerPrimarySpan = Double(min(100, max(5, newPercent))) / 100.0
+                controller.updateNiriConfig(defaultContainerPrimarySpan: settings.niriDefaultContainerPrimarySpan)
                 controller.balanceNiriSizesAllWorkspaces()
             }
         )
-        let presets = settings.niriColumnWidthPresets
+        let presets = settings.niriContainerPrimarySpanPresets
 
         Section("Niri Layout") {
             SettingsSliderRow(
-                label: "Visible Columns",
+                label: "Visible Containers",
                 value: Binding(
-                    get: { Double(settings.niriMaxVisibleColumns) },
-                    set: { settings.niriMaxVisibleColumns = Int($0) }
+                    get: { Double(settings.niriVisibleContainerCount) },
+                    set: { settings.niriVisibleContainerCount = Int($0) }
                 ),
                 range: 1 ... 5,
                 step: 1,
-                valueText: "\(settings.niriMaxVisibleColumns)",
+                valueText: "\(settings.niriVisibleContainerCount)",
                 valueWidth: 32
             )
-            .onChange(of: settings.niriMaxVisibleColumns) { _, newValue in
-                settings.niriDefaultColumnWidth = nil
+            .onChange(of: settings.niriVisibleContainerCount) { _, newValue in
+                settings.niriDefaultContainerPrimarySpan = nil
                 controller.updateNiriConfig(
-                    maxVisibleColumns: newValue,
-                    defaultColumnWidth: settings.niriDefaultColumnWidth
+                    visibleContainerCount: newValue,
+                    defaultContainerPrimarySpan: settings.niriDefaultContainerPrimarySpan
                 )
                 controller.balanceNiriSizesAllWorkspaces()
             }
@@ -356,22 +377,22 @@ private struct GlobalNiriSettingsSection: View {
             )
             SettingsCaption(
                 "How a lone window is sized: Full Screen fills the work area; "
-                    + "Custom uses a fixed width × height; Column Width keeps the Default New Column Width"
+                    + "Custom uses a fixed width × height; Container Primary Span keeps the configured primary span."
             )
         }
 
-        Section("Default New Column Width") {
-            Picker("Width Mode", selection: useAutoDefaultColumnWidth) {
+        Section("Default New Container Primary Span") {
+            Picker("Span Mode", selection: useAutoDefaultContainerPrimarySpan) {
                 Text("Auto").tag(true)
                 Text("Custom").tag(false)
             }
             .pickerStyle(.segmented)
             .frame(maxWidth: 220)
 
-            if settings.niriDefaultColumnWidth != nil {
-                LabeledContent("Custom Width") {
+            if settings.niriDefaultContainerPrimarySpan != nil {
+                LabeledContent("Custom Span") {
                     HStack {
-                        TextField("Custom Width", value: defaultColumnWidthPercent, format: .number)
+                        TextField("Custom Span", value: defaultContainerPrimarySpanPercent, format: .number)
                             .labelsHidden()
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 48)
@@ -383,63 +404,66 @@ private struct GlobalNiriSettingsSection: View {
             }
 
             SettingsCaption(
-                settings.niriDefaultColumnWidth == nil
-                    ? "Auto uses the balanced width for the current Visible Columns setting."
-                    : "New or claimed columns start at this width until you resize them."
+                settings.niriDefaultContainerPrimarySpan == nil
+                    ? "Auto divides the primary axis by the Visible Containers setting."
+                    : "New or claimed containers start at this primary span until you resize them."
             )
         }
 
-        Section("Column Width Cycle Presets") {
+        Section("Container Primary Span Presets") {
             ForEach(presets.indices, id: \.self) { index in
                 LabeledContent("Preset \(index + 1)") {
                     HStack {
                         TextField("Preset \(index + 1)", value: Binding(
                             get: { Int(presets[index] * 100) },
                             set: { newPercent in
-                                var current = settings.niriColumnWidthPresets
+                                var current = settings.niriContainerPrimarySpanPresets
                                 current[index] = Double(min(100, max(5, newPercent))) / 100.0
-                                settings.niriColumnWidthPresets = current
-                                controller.updateNiriConfig(columnWidthPresets: settings.niriColumnWidthPresets)
+                                settings.niriContainerPrimarySpanPresets = current
+                                controller
+                                    .updateNiriConfig(containerPrimarySpanPresets: settings
+                                        .niriContainerPrimarySpanPresets)
                             }
                         ), format: .number)
                             .labelsHidden()
                             .textFieldStyle(.roundedBorder)
                             .frame(width: 48)
                             .multilineTextAlignment(.trailing)
-                            .accessibilityLabel("Preset \(index + 1) width")
+                            .accessibilityLabel("Preset \(index + 1) primary span")
                         Text("%")
                             .foregroundStyle(.secondary)
                         Button(role: .destructive) {
-                            var presets = settings.niriColumnWidthPresets
+                            var presets = settings.niriContainerPrimarySpanPresets
                             presets.remove(at: index)
-                            settings.niriColumnWidthPresets = presets
-                            controller.updateNiriConfig(columnWidthPresets: settings.niriColumnWidthPresets)
+                            settings.niriContainerPrimarySpanPresets = presets
+                            controller
+                                .updateNiriConfig(containerPrimarySpanPresets: settings.niriContainerPrimarySpanPresets)
                         } label: {
                             Label("Remove preset \(index + 1)", systemImage: "minus.circle")
                                 .labelStyle(.iconOnly)
                         }
                         .buttonStyle(.borderless)
                         .help("Remove preset \(index + 1)")
-                        .disabled(settings.niriColumnWidthPresets.count <= 2)
+                        .disabled(settings.niriContainerPrimarySpanPresets.count <= 2)
                     }
                 }
             }
 
             HStack {
                 Button("Add Preset") {
-                    var presets = settings.niriColumnWidthPresets
+                    var presets = settings.niriContainerPrimarySpanPresets
                     presets.append(0.5)
-                    settings.niriColumnWidthPresets = presets
-                    controller.updateNiriConfig(columnWidthPresets: settings.niriColumnWidthPresets)
+                    settings.niriContainerPrimarySpanPresets = presets
+                    controller.updateNiriConfig(containerPrimarySpanPresets: settings.niriContainerPrimarySpanPresets)
                 }
                 Button("Reset Cycle Presets") {
-                    settings.niriColumnWidthPresets = SettingsStore.defaultColumnWidthPresets
-                    controller.updateNiriConfig(columnWidthPresets: settings.niriColumnWidthPresets)
+                    settings.niriContainerPrimarySpanPresets = SettingsStore.defaultContainerPrimarySpanPresets
+                    controller.updateNiriConfig(containerPrimarySpanPresets: settings.niriContainerPrimarySpanPresets)
                 }
             }
             SettingsCaption("Resize commands cycle through these presets in order. Duplicates are allowed.")
         }
-        .id(settings.niriColumnWidthPresets.count)
+        .id(settings.niriContainerPrimarySpanPresets.count)
     }
 }
 
@@ -450,17 +474,14 @@ private struct MonitorNiriSettingsSection: View {
 
     private var monitorSettings: MonitorNiriSettings {
         settings.niriSettings(for: monitor) ?? MonitorNiriSettings(
-            monitorName: monitor.name,
-            monitorDisplayId: monitor.displayId
+            monitorName: monitor.name
         )
     }
 
     private func updateSetting(_ update: (inout MonitorNiriSettings) -> Void) {
         var ms = monitorSettings
-        ms.monitorName = monitor.name
-        ms.monitorDisplayId = monitor.displayId
         update(&ms)
-        settings.updateNiriSettings(ms)
+        settings.updateNiriSettings(ms, for: monitor)
         controller.updateMonitorNiriSettings()
     }
 
@@ -469,19 +490,19 @@ private struct MonitorNiriSettingsSection: View {
 
         Section("Niri Layout") {
             OverridableSlider(
-                label: "Visible Columns",
-                value: ms.maxVisibleColumns.map { Double($0) },
-                globalValue: Double(settings.niriMaxVisibleColumns),
+                label: "Visible Containers",
+                value: ms.visibleContainerCount.map { Double($0) },
+                globalValue: Double(settings.niriVisibleContainerCount),
                 range: 1 ... 5,
                 step: 1,
                 formatter: { "\(Int($0))" },
                 onChange: { newValue in
-                    updateSetting { $0.maxVisibleColumns = Int(newValue) }
-                    settings.niriDefaultColumnWidth = nil
-                    controller.updateNiriConfig(defaultColumnWidth: settings.niriDefaultColumnWidth)
+                    updateSetting { $0.visibleContainerCount = Int(newValue) }
+                    settings.niriDefaultContainerPrimarySpan = nil
+                    controller.updateNiriConfig(defaultContainerPrimarySpan: settings.niriDefaultContainerPrimarySpan)
                     controller.balanceNiriSizesAllWorkspaces()
                 },
-                onReset: { updateSetting { $0.maxVisibleColumns = nil } }
+                onReset: { updateSetting { $0.visibleContainerCount = nil } }
             )
 
             OverridableToggle(

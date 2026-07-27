@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Copyright (C) 2026 BarutSRB — https://github.com/BarutSRB/OmniWM
 
+import AppKit
 import ApplicationServices
 import CoreGraphics
 import Foundation
@@ -16,6 +17,7 @@ final class WorkspaceBarDataSourceTests: XCTestCase {
         let monitor: Monitor
         let workspaceId: WorkspaceDescriptor.ID
         let appInfoCache: AppInfoCache
+        let iconResolver: WorkspaceBarIconResolver
     }
 
     private struct WindowSpec {
@@ -57,10 +59,10 @@ final class WorkspaceBarDataSourceTests: XCTestCase {
         )
         let item = try XCTUnwrap(projection.items.first { $0.id == fixture.workspaceId })
 
-        XCTAssertEqual(item.tiledWindows.count, 1)
-        XCTAssertEqual(item.tiledWindows[0].windowCount, 2)
+        XCTAssertEqual(item.tiledWindows.count, 2)
+        XCTAssertTrue(item.tiledWindows.allSatisfy { $0.windowCount == 1 })
         XCTAssertEqual(
-            Set(item.tiledWindows[0].allWindows.map(\.id)),
+            Set(item.tiledWindows.flatMap(\.allWindows).map(\.id)),
             Set([windows.retainedTiledOne, windows.retainedTiledTwo])
         )
         XCTAssertEqual(item.floatingWindows.map(\.id), [windows.retainedFloating])
@@ -108,6 +110,8 @@ final class WorkspaceBarDataSourceTests: XCTestCase {
             mode: .tiling,
             to: fixture
         )
+        _ = try XCTUnwrap(fixture.workspaceManager.workspaceId(for: "2", createIfMissing: true))
+        _ = fixture.workspaceManager.focusWorkspace(named: "2")
 
         let visibleEmptyProjection = project(
             fixture,
@@ -127,6 +131,36 @@ final class WorkspaceBarDataSourceTests: XCTestCase {
         )
         XCTAssertFalse(hiddenEmptyProjection.items.contains { $0.id == fixture.workspaceId })
         XCTAssertEqual(fixture.workspaceManager.entry(for: token)?.workspaceId, fixture.workspaceId)
+    }
+
+    func testActiveWorkspaceStaysOnBarWhileEmptyWorkspacesAreHidden() throws {
+        let fixture = try makeFixture()
+        let occupiedId = try XCTUnwrap(
+            fixture.workspaceManager.workspaceId(for: "2", createIfMissing: true)
+        )
+        _ = addWindow(
+            token: WindowToken(pid: 47_001, windowId: 47_101),
+            bundleId: "com.example.retained",
+            mode: .tiling,
+            workspaceId: occupiedId,
+            workspaceManager: fixture.workspaceManager
+        )
+        let idleId = try XCTUnwrap(
+            fixture.workspaceManager.workspaceId(for: "3", createIfMissing: true)
+        )
+        XCTAssertEqual(fixture.workspaceManager.activeWorkspace(on: fixture.monitor.id)?.id, fixture.workspaceId)
+
+        let projection = project(
+            fixture,
+            hideEmptyWorkspaces: true,
+            excludedBundleIDs: []
+        )
+
+        let activeItem = try XCTUnwrap(projection.items.first { $0.id == fixture.workspaceId })
+        XCTAssertTrue(activeItem.isFocused)
+        XCTAssertTrue(activeItem.windows.isEmpty)
+        XCTAssertTrue(projection.items.contains { $0.id == occupiedId })
+        XCTAssertFalse(projection.items.contains { $0.id == idleId })
     }
 
     func testExcludedScratchpadSuppressesOnlyItsBarPill() throws {
@@ -201,6 +235,173 @@ final class WorkspaceBarDataSourceTests: XCTestCase {
         XCTAssertNotNil(controller.workspaceManager.entry(for: token))
     }
 
+    func testWorkspaceBarFocusUsesIdentityForDuplicateDisplayNames() throws {
+        let settings = makeSettingsStore()
+        let displayName = "🚀"
+        settings.workspaceConfigurations = [
+            WorkspaceConfiguration(name: "1", displayName: displayName),
+            WorkspaceConfiguration(name: "2", displayName: displayName)
+        ]
+        let controller = WMController(
+            settings: settings,
+            windowFocusOperations: WindowFocusOperations(
+                activateApp: { _ in },
+                focusSpecificWindow: { _, _, _ in },
+                raiseWindow: { _ in }
+            )
+        )
+        let monitor = makeMonitor(displayId: 47_001)
+        controller.workspaceManager.applyMonitorConfigurationChange([monitor])
+        let sourceWorkspaceId = try XCTUnwrap(
+            controller.workspaceManager.workspaceId(for: "1", createIfMissing: false)
+        )
+        let targetWorkspaceId = try XCTUnwrap(
+            controller.workspaceManager.workspaceId(for: "2", createIfMissing: false)
+        )
+        _ = controller.workspaceManager.focusWorkspace(named: "1")
+
+        let projection = WorkspaceBarDataSource.workspaceBarProjection(
+            for: monitor,
+            options: WorkspaceBarProjectionOptions(
+                deduplicateAppIcons: false,
+                hideEmptyWorkspaces: false,
+                showFloatingWindows: false,
+                excludedBundleIDs: []
+            ),
+            workspaceManager: controller.workspaceManager,
+            appInfoCache: controller.appInfoCache,
+            iconResolver: controller.workspaceBarIconResolver,
+            focusedToken: nil,
+            settings: settings
+        )
+        let sourceItem = try XCTUnwrap(projection.items.first { $0.rawName == "1" })
+        let targetItem = try XCTUnwrap(projection.items.first { $0.rawName == "2" })
+
+        XCTAssertEqual(sourceItem.name, displayName)
+        XCTAssertEqual(targetItem.name, displayName)
+        XCTAssertEqual(sourceItem.rawName, "1")
+        XCTAssertEqual(targetItem.rawName, "2")
+        XCTAssertNotEqual(sourceItem.rawName, targetItem.rawName)
+        XCTAssertEqual(sourceItem.id, sourceWorkspaceId)
+        XCTAssertEqual(targetItem.id, targetWorkspaceId)
+        XCTAssertNotEqual(sourceItem.id, targetItem.id)
+        controller.focusWorkspaceFromBar(id: targetItem.id)
+        XCTAssertEqual(controller.workspaceManager.activeWorkspace(on: monitor.id)?.id, targetWorkspaceId)
+
+        let unknownWorkspaceId = UUID()
+        XCTAssertNil(controller.workspaceManager.descriptor(for: unknownWorkspaceId))
+        XCTAssertFalse(controller.windowActionHandler.focusWorkspaceFromBar(id: unknownWorkspaceId))
+        XCTAssertEqual(controller.workspaceManager.activeWorkspace(on: monitor.id)?.id, targetWorkspaceId)
+    }
+
+    func testDeduplicationUsesCaseNormalizedBundleIdentity() throws {
+        let overrideImage = NSImage(size: NSSize(width: 24, height: 24))
+        let fixture = try makeFixture { _ in overrideImage }
+        let first = addWindow(
+            pid: 48_001,
+            windowId: 48_101,
+            bundleId: "Com.Example.Shared",
+            mode: .tiling,
+            to: fixture
+        )
+        let second = addWindow(
+            pid: 48_002,
+            windowId: 48_102,
+            bundleId: "com.example.shared",
+            mode: .tiling,
+            to: fixture
+        )
+        fixture.iconResolver.synchronize(
+            overrides: ["COM.EXAMPLE.SHARED": "icons/shared.icns"]
+        )
+
+        let projection = project(
+            fixture,
+            deduplicate: true,
+            excludedBundleIDs: []
+        )
+        let item = try XCTUnwrap(projection.items.first { $0.id == fixture.workspaceId })
+        let window = try XCTUnwrap(item.tiledWindows.first)
+
+        XCTAssertEqual(item.tiledWindows.count, 1)
+        XCTAssertEqual(window.windowCount, 2)
+        XCTAssertEqual(Set(window.allWindows.map(\.id)), Set([first, second]))
+        XCTAssertTrue(window.icon === overrideImage)
+    }
+
+    func testSameDisplayNameWithDifferentBundleIdsStaysSeparate() throws {
+        let fixture = try makeFixture()
+        let first = addWindow(
+            pid: 49_001,
+            windowId: 49_101,
+            bundleId: "com.example.first",
+            mode: .tiling,
+            to: fixture
+        )
+        let second = addWindow(
+            pid: 49_002,
+            windowId: 49_102,
+            bundleId: "com.example.second",
+            mode: .tiling,
+            to: fixture
+        )
+
+        let projection = project(
+            fixture,
+            deduplicate: true,
+            excludedBundleIDs: []
+        )
+        let item = try XCTUnwrap(projection.items.first { $0.id == fixture.workspaceId })
+
+        XCTAssertEqual(item.tiledWindows.map(\.appName), ["Unknown", "Unknown"])
+        XCTAssertEqual(Set(item.tiledWindows.map(\.id)), Set([first, second]))
+        XCTAssertTrue(item.tiledWindows.allSatisfy { $0.windowCount == 1 })
+    }
+
+    func testOverrideAppliesToTiledFloatingAndScratchpadItems() throws {
+        let overrideImage = NSImage(size: NSSize(width: 32, height: 32))
+        let fixture = try makeFixture { _ in overrideImage }
+        let tiled = addWindow(
+            pid: 50_001,
+            windowId: 50_101,
+            bundleId: "com.example.override",
+            mode: .tiling,
+            to: fixture
+        )
+        let floating = addWindow(
+            pid: 50_002,
+            windowId: 50_102,
+            bundleId: "com.example.override",
+            mode: .floating,
+            to: fixture
+        )
+        let scratchpad = addWindow(
+            pid: 50_003,
+            windowId: 50_103,
+            bundleId: "com.example.override",
+            mode: .floating,
+            to: fixture
+        )
+        XCTAssertTrue(fixture.workspaceManager.setScratchpadToken(scratchpad))
+        fixture.iconResolver.synchronize(
+            overrides: ["com.example.override": "icons/custom.png"]
+        )
+
+        let projection = project(
+            fixture,
+            showFloatingWindows: true,
+            excludedBundleIDs: []
+        )
+        let item = try XCTUnwrap(projection.items.first { $0.id == fixture.workspaceId })
+        let tiledItem = try XCTUnwrap(item.tiledWindows.first { $0.id == tiled })
+        let floatingItem = try XCTUnwrap(item.floatingWindows.first { $0.id == floating })
+        let scratchpadItem = try XCTUnwrap(projection.scratchpad)
+
+        XCTAssertTrue(tiledItem.icon === overrideImage)
+        XCTAssertTrue(floatingItem.icon === overrideImage)
+        XCTAssertTrue(scratchpadItem.window.icon === overrideImage)
+    }
+
     private func project(
         _ fixture: Fixture,
         deduplicate: Bool = false,
@@ -218,6 +419,7 @@ final class WorkspaceBarDataSourceTests: XCTestCase {
             ),
             workspaceManager: fixture.workspaceManager,
             appInfoCache: fixture.appInfoCache,
+            iconResolver: fixture.iconResolver,
             focusedToken: nil,
             settings: fixture.settings
         )
@@ -281,7 +483,9 @@ final class WorkspaceBarDataSourceTests: XCTestCase {
         )
     }
 
-    private func makeFixture() throws -> Fixture {
+    private func makeFixture(
+        imageLoader: @escaping WorkspaceBarIconResolver.ImageLoader = { _ in nil }
+    ) throws -> Fixture {
         let settings = makeSettingsStore()
         let workspaceManager = WorkspaceManager(settings: settings)
         let monitor = makeMonitor(displayId: 40_001)
@@ -295,7 +499,12 @@ final class WorkspaceBarDataSourceTests: XCTestCase {
             workspaceManager: workspaceManager,
             monitor: monitor,
             workspaceId: workspaceId,
-            appInfoCache: AppInfoCache()
+            appInfoCache: AppInfoCache(),
+            iconResolver: WorkspaceBarIconResolver(
+                settingsFileURL: settings.settingsFileURL,
+                imageLoader: imageLoader,
+                unavailableLogger: { _ in }
+            )
         )
     }
 
