@@ -173,7 +173,8 @@ The application starts in `Sources/OmniWMApp/OmniWMApp.swift`:
 8. **`IPCServer`** — started only if `ipcEnabled` is set.
 9. **Automatic update checks** — started last, only after bootstrap succeeds.
 
-`applicationWillTerminate` flushes the window-restore catalog, settings, and runtime state, then stops the IPC server.
+`applicationWillTerminate` tears down the status bar and Hidden Bar assessment assertion, stops window-management
+services, flushes the window-restore catalog, settings, and runtime state, then stops the IPC server.
 
 ### Service Startup
 
@@ -237,7 +238,7 @@ OmniWM is fundamentally **reactive**. Every signal — a window appearing, a hot
 │    engines under a build scope to build an EffectPlan, drops stale    │
 │    plans via seq/InvalidationMarks, executes frame diffs.            │
 │  AXManager → AppAXContext: writes CGRects on per-app run-loop threads.│
-│  AXFrameApplicationLedger: dedup / verify / retry / learn quantum.   │
+│  AXFrameApplicationLedger: dedup / verify / retry / convergence.     │
 └───────────────────────────────┬──────────────────────────────────────┘
                                  │  noteWorldChanged()
                                  v
@@ -306,7 +307,13 @@ struct AXWindowRef: Hashable, @unchecked Sendable {
 
 **Managed Replacement:**
 
-Some apps (Ghostty, browsers) destroy and recreate windows during internal operations. `AXEventHandler` correlates a destroy+create pair via `ManagedReplacementMetadata` and emits a `.windowRekeyed` event so the new window inherits the old one's workspace, mode, and position instead of being admitted fresh.
+Some apps (Ghostty, browsers) destroy and recreate windows during internal operations. `AXEventHandler` correlates a destroy+create pair via `ManagedReplacementMetadata` and emits a `.windowRekeyed` event so the new window inherits the old one's workspace, mode, and position instead of being admitted fresh. A full rescan that intersects an existing correlation burst awaits its already-armed grace task before taking the enumeration snapshot. It does not cancel the burst or shorten the grace interval, so an unmatched close is replayed before enumeration while a create arriving inside the interval can still preserve the original identity. When an untracked full-rescan candidate is the exact live target of a non-exhausted identity-rebind retry, the authoritative source token remains preserved until the rebind settles. Target destruction, retry exhaustion, source disappearance or incarnation change, and any target token or AX-identity mismatch fall through to normal admission and retirement.
+
+`WorldStore` applies managed-window identity and Space-membership lifecycle changes together. Definitive removal deletes the window's membership, while rekey transfers membership only when the old Space still exists in the current topology and the replacement has no newer membership observation. Transient destroy/close correlation therefore cannot erase the evidence needed to distinguish native fullscreen suspension from authoritative retirement.
+
+**Workspace placement:**
+
+`PlacementResolver` applies continuity before fresh placement: automatic readmission keeps the existing workspace, structural replacements keep their original workspace and identity, tracked transient children inherit their parent workspace, and unique persisted boot-restore matches retain restore authority. A valid workspace rule is the initial default only while that running app instance has no tracked window; explicit rule application can still move existing windows. Later tiled and parentless floating live creates use a pending managed-focus destination and the interaction workspace captured when the create event arrived before mode-specific native-Space, focus, and frame fallbacks. Finder Quick Look is the narrow exception: native-Space and same-process tiled-window spawn placement remain ahead of interaction so its macOS focus churn cannot redirect the preview. Contextless startup and full-rescan discovery remain conservative and frame-distributed.
 
 ### 3.4 Stage 2 — WorldStore, the Single Writer
 
@@ -355,11 +362,17 @@ Some apps (Ghostty, browsers) destroy and recreate windows during internal opera
 
 | Route | When | What it does |
 |-------|------|--------------|
-| `fullRescan` | Startup, app launch/terminate, space change, display change | Full enumeration + relayout |
-| `relayout` | Config change, window created, frame changed | Recompute from current state (debounced) |
+| `fullRescan` | Startup/global fallback, app launch/rebind recovery, space/wake/display inventory | Global or scope-limited enumeration + relayout |
+| `relayout` | Config change, app termination, window created, frame changed | Recompute from current state (debounced) |
 | `immediateRelayout` | Commands, gestures, workspace switch | Synchronous relayout |
 | `visibilityRefresh` | App hidden/unhidden | Show/hide only |
 | `windowRemoval` | Window destroyed | Remove + relayout + focus recovery |
+
+**Inventory scope and authority.** Startup, app-rule reevaluation, and incomplete scoped evidence retain the global inventory path. App launch and identity/binding recovery enumerate only the affected app PIDs. Active-Space changes enumerate the newly active native Spaces plus exact managed windows previously or currently known on those Spaces. If a fullscreen Space disappears between the baseline and stable topology, its previously mapped managed windows remain exact scoped targets, but the vanished Space itself is not queried and the scan does not widen to every window owned by those PIDs. Wake, unlock, and display changes apply each first usable topology sample immediately for frame-write safety by carrying forward known membership without issuing per-window membership queries, while deferring native-fullscreen lifecycle reconciliation. A matching second sample performs one membership-query pass, preserves last-known membership when a private query is inconclusive, and reconciles fullscreen state before issuing one coalesced scoped inventory. For each requested native Space, `SLSCopyWindowsWithOptionsAndTags` supplies raw membership. OmniWM deduplicates those IDs and performs one initial bulk WindowServer detail query; targeted reconciliation can issue additional bulk queries for preserved managed IDs and AX-discovered dependency windows. AX work is limited to selected application roots, although each selected root still enumerates `kAXWindows` and resolves WindowServer IDs before filtering.
+
+A scoped scan may update missing-window counters only for explicit app roots whose AX enumeration and identity dependencies succeeded. Unrelated windows retain their existing counters and bindings. `LayoutRefreshController.LayoutState` owns these transient observations keyed by stable `WindowHandle` identity, so rekeys preserve an observation while a same-token reincarnation starts clean. Observing or resetting them does not mutate `WorldStore`, create a semantic reconcile transaction, advance world sequence, rebuild snapshots, or emit trace records. Missing windows still require two consecutive authoritative observations; the first scoped miss schedules one delayed confirmation of the same scope. A failed or unavailable native-Space query promotes the request to the global safety path rather than treating an unknown inventory as empty.
+
+Scoped reconciliation reduces application-root enumeration and full AX-fact work relative to a global scan; it does not make refresh proportional only to changed windows. Topology refresh still checks native-Space membership for each tracked managed window, and selected AX roots still enumerate their window lists. Its latency and allocation benefit remains unproven until measured.
 
 **Plan-building runs inside a commit.** `buildRelayoutEffectPlan` calls `NiriLayoutHandler.layoutWithNiriEngine` (and the Dwindle equivalent), which run `syncWindows`/`removeWindows`/`restoreInitialPlacements` on the engines inside `workspaceManager.withBatchedLayoutBuild` — a single synchronous `layout_build` commit that also stamps each plan's `plannedSeq`. The layout engines return raw `[WindowToken: CGRect]` frame maps; the handlers wrap those into a `WorkspaceLayoutPlan` → `WorkspaceLayoutDiff` → `EffectPlan` (`Core/Layout/LayoutBoundary.swift`).
 
@@ -465,7 +478,7 @@ WorkspaceManager
 
 **`WorldStore.commit` is the only mutation path**, entered through `WorkspaceManager.recordReconcileEvent(_ event: WMEvent)` (which supplies the snapshot/resolve closures and writes the resolved `ActionPlan` back through the in-commit mutators).
 
-**`WindowModel`** (`Core/Workspace/WindowModel.swift`) is a reference-type per-window registry — but it is now **private to `WorldStore`**, not a shared source of truth. It stores one `WindowState` per `WindowToken` plus reverse indexes (`windowIdToToken`, `tokensByWorkspace`, `tokensByWorkspaceMode`, `tokensByPid`), constraint/min-size caches, and missing-detection counters.
+**`WindowModel`** (`Core/Workspace/WindowModel.swift`) is a reference-type per-window registry — but it is now **private to `WorldStore`**, not a shared source of truth. It stores one `WindowState` per `WindowToken` plus reverse indexes (`windowIdToToken`, `tokensByWorkspace`, `tokensByWorkspaceMode`, `tokensByPid`) and constraint/min-size caches. Missing-detection counters are transient reconciliation state owned by `LayoutRefreshController.LayoutState`, as described in [Stage 3](#35-stage-3--the-effector--refresh-pipeline), and do not enter `WorldStore` commits.
 
 **`WindowState`** (`Core/Workspace/WindowState.swift`) is the per-window record — a `struct` (the old nested `WindowModel.Entry` is gone):
 
@@ -523,7 +536,7 @@ NiriRoot (per workspace)
 
 **File organization.** The core engine is split across `NiriLayoutEngine.swift` plus twelve `NiriLayoutEngine+*.swift` extensions (`+Animation`, `+ColumnOps`, `+Monitors`, `+Sizing`, `+TabbedMode`, `+WindowOps`, `+Windows`, `+WorkspaceOps`, `+InteractiveMove`, `+InteractiveResize`, …), with navigation in `NiriNavigation.swift`, the node tree in `NiriNode.swift`, viewport math in `ViewportState.swift` (+4 extensions), and overlays for interactive move/resize, drag ghost, and swap targets. Tabbed Niri columns and grouped Dwindle tiles share the surface-layer `TabRailManager`.
 
-**Interactive move/resize.** Option+Shift+drag moves windows between containers; `DragGhostController` captures a ScreenCaptureKit thumbnail shown as a translucent ghost and `SwapTargetOverlay` highlights the drop target. Edge-dragging resizes the container on the primary axis and the selected window on the secondary axis. Each interaction captures its orientation at begin and keeps that axis ownership through update and completion.
+**Interactive move/resize.** Desktop Niri moves resolve one configured non-Shift modifier chord at mouse-down. The chord defaults to Option: the base chord swaps windows, adding Shift selects insertion, and Off leaves modified drags entirely to applications. `DragGhostController` captures a ScreenCaptureKit thumbnail shown as a translucent ghost and `SwapTargetOverlay` highlights the drop target. Edge-dragging resizes the container on the primary axis and the selected window on the secondary axis. Each interaction captures its orientation at begin and keeps that axis ownership through update and completion.
 
 ### 4.4 Dwindle Layout Engine (BSP)
 
@@ -600,7 +613,7 @@ Focus management is split across several objects (there is no single coordinator
 
 **Hotkeys** (`Sources/OmniWM/Core/Input/`)
 
-`ActionCatalog` is the source of truth for bindable actions. `buildSpecs()` materializes **153** `ActionSpec`s (99 standalone actions + 6 loop templates × 9), each with a title, search keywords, category, layout compatibility, and default binding. `HotkeyBinding`/`HotkeyBindingRegistry` persist and canonicalize per-action bindings (an action can have several shortcuts).
+`ActionCatalog` is the source of truth for bindable actions. `buildSpecs()` materializes **157** `ActionSpec`s (103 standalone actions + 6 loop templates × 9), each with a title, search keywords, category, layout compatibility, and default binding. `HotkeyBinding`/`HotkeyBindingRegistry` persist and canonicalize per-action bindings (an action can have several shortcuts).
 
 `HotkeyCenter` (`Hotkeys.swift`) installs one Carbon `InstallEventHandler` and registers each binding via `RegisterEventHotKey`, plus a virtual-hyper synthesis path. On a press it emits a `HotkeyInvocation` through `onCommand`; the invocation carries the semantic `HotkeyCommand` and optional `PhysicalHotkeyTrigger` metadata (`keyCode`, modifiers, and repeat state). `WMController` wires it to `eventIntake.enqueue(.hotkeyInvocation(invocation))`, so physical commands enter the same ordered intake pipeline as everything else (falling back to `CommandHandler.handleHotkeyInvocation` only if intake is closed).
 
@@ -629,14 +642,16 @@ Window create/move/front-app events originate here; AX *destroy/miniaturize/focu
 
 `decision(facts) -> WindowDecision` compiles user rules + built-in rules into `CompiledRule`s and ranks matches by specificity then declaration order. Evaluation precedence (first decisive match wins):
 
-1. System text-input panels → unmanaged
-2. Explicit user rule (bundle ID, app name, title literal/regex, AX role/subrole)
-3. Explicit built-in rule (default-floating apps, browser PiP regex, Steam tile)
-4. CleanShot recording overlay → unmanaged
-5. Required-title-missing → deferral
-6. App in native fullscreen → managed
-7. Attribute-fetch failure → deferral
-8. `AXWindowService` heuristic (size constraints, role/subrole)
+1. `AXHelpTag` role → hard unmanaged
+2. System text-input panels → unmanaged
+3. Explicit user rule (bundle ID, app name, title literal/regex, AX role/subrole)
+4. Explicit built-in rule (default-floating apps, browser PiP regex, Steam tile)
+5. CleanShot recording overlay → floating
+6. Required-title-missing → deferral
+7. App in native fullscreen → managed
+8. Attribute-fetch failure → deferral
+9. Exact AX/WindowServer transient-widget signature → unmanaged; missing exact WindowServer evidence → deferral
+10. `AXWindowService` heuristic (size constraints, role/subrole)
 
 ```swift
 struct WindowDecision {
@@ -646,6 +661,16 @@ struct WindowDecision {
     let ruleEffects: ManagedWindowRuleEffects   // minWidth/minHeight
 }
 ```
+
+The hard help-tag decision is app-independent and trusts a known `AXHelpTag` role without WindowServer
+evidence. It runs before configurable rules, contributes no rule effects, and keeps tooltip/help surfaces out of
+world state and auxiliary surfaces. The transient-widget decision is also app-independent and intentionally
+narrow: `AXWindow` + `AXUnknown`, no standard window buttons, and exact matching WindowServer identity with
+level zero, a nonzero non-self parent, a floating tag, and no document or modal tag. It does not inspect or
+require the parent to be tracked. Live evaluation performs at most one targeted WindowServer lookup only after
+this AX shape remains undecided (or for CleanShot's existing special case). Full-rescan reduction uses only its
+captured WindowServer snapshot. Existing tracked windows retain their mode during automatic reevaluation for
+the generic transient decision, while the hard help-tag exclusion can evict a previously tracked help surface.
 
 Per-app `initialContainerPrimarySpan` is an admission hint, not an ongoing `ManagedWindowRuleEffects` constraint.
 `WindowRuleEngine` takes it only from the single winning rule, and Niri consumes it once when a resizable
@@ -692,10 +717,11 @@ IPCClient ──── Unix socket ────► IPCConnection (actor, per cli
 
 **Frame application.** `AXManager.applyFramesParallel` (still the live entry point — "parallel" refers to the per-app *thread* fan-out, not GCD) coalesces requests per pid and dispatches one `setFramesBatch` to each app's thread. The verification and retry bookkeeping lives in **`AXFrameApplicationLedger`**:
 
-1. `prepareFrameApplication` dedups a target against the last-applied / pending frame within tolerance.
+1. `prepareFrameApplication` dedups a target against the last-applied / pending frame within tolerance or the exact target of an accepted size convergence.
 2. The write happens on the app thread via `AXWindowService.setFrame` (writes `kAXSize`/`kAXPosition` in order, then reads back to verify).
 3. `handleFrameApplyResults` verifies observed vs. target; on mismatch it retries within a per-window budget (`retryBudgetByWindowId`, default 1) — re-enqueued synchronously by `AXManager`, scheduled via a per-window `Task { @MainActor }` generation counter, **not** the `DeadlineWheel`.
-4. On repeated mismatch it calls `learnSizeQuantum` to record the app's snap quantum (capped at 16pt), so OmniWM stops fighting apps that round their own size to a grid.
+4. After the evidence retry, a repeated `verificationMismatch` is accepted only when both AX setters succeeded, both readbacks match, and the observed frame preserves the AX top-left position (`minX` and AppKit `maxY`) while differing solely by a bounded (≤16pt) app size snap. The ledger records the observed frame with that exact requested target, clears retry/failure state, and terminal observers receive normalized verified success. A different target always produces a new write; unstable readback, position drift, larger size deltas, and AX setter failures remain terminal refusals.
+5. `FrameApplyTrace` records the raw AX result and the distinct `accepted-size-convergence` decision, keeping platform write evidence separate from ledger policy.
 
 **Inactive-workspace suppression.** Windows on non-visible workspaces are tracked in `AXManager.inactiveWorkspaceWindowIds` (a `Set<Int>` rebuilt by `LayoutRefreshController`) and checked live before each write, avoiding pointless AX calls and visual glitches.
 
@@ -725,7 +751,7 @@ Native fullscreen is co-driven by two observed facts: (1) SkyLight fullscreen-sp
 
 `SurfaceDerivation.derive(world:)` is a pure transform `WorldView → DesiredSurfaceScene`. The border-eligibility gate in `deriveBorder` is the load-bearing logic: border config enabled, target not an owned OmniWM surface, no pending native-fullscreen transition, not suppressed/fullscreen, workspace visible, valid frame.
 
-**The focus border** is no longer an `NSWindow` managed by a dedicated controller. It is a derived surface applied by `BorderSurfaceApplier`, which drives a `BorderWindow` — a private **SkyLight/CGS server-side window** (created via `SkyLight.createBorderWindow`, drawn into a `CGContext`), positioned one level *below* the target window via `transactionMoveAndOrder(.below)`, and registered with `SurfaceCoordinator` by CGS window *number*.
+**The focus border** is no longer an `NSWindow` managed by a dedicated controller. It is a derived surface applied by `BorderSurfaceApplier`, which drives a `BorderWindow` — a private **SkyLight/CGS server-side window** (created via `SkyLight.createBorderWindow`, drawn into a `CGContext`), positioned one level *below* the target window via `transactionMoveAndOrder(.below)`, and registered with `SurfaceCoordinator` by CGS window *number*. Because that ordering is applied at CGS level 3, the border window sits above the level-0 app window it rings, and its shape is the full target rect (only the ring is painted) — so at creation it opts out of the screenshot window picker by setting the `IgnoreForScreencaptureWindowSelection` CGS property, which `/usr/sbin/screencapture` reads to skip a window and select the one beneath it. Without it, `Cmd+Shift+4` ▸ `Space` selects the border instead of the focused window and captures an empty ring (#544, #150). The property is invisible to full-screen captures and screen recording.
 
 **`SurfaceCoordinator`** (a `.shared` singleton) is the registry of OmniWM-owned surfaces, backed by `SurfaceScene`. Beyond "exclude from tiling" it answers hit-testing (`containsInteractive`), ScreenCaptureKit capture-eligibility (`isCaptureEligible`), and focus-recovery suppression (`hasFrontmostSuppressingWindow`). The vocabulary lives in `SurfaceScene.swift`: `SurfaceKind` (`border`, `workspaceBar`, `overview`, `nativeFullscreenPlaceholder`, `tabRail`, `dragGhost`, `utility`, `quake`), `HitTestPolicy`, `CapturePolicy`, and `SurfacePolicy` (which bundles them plus `suppressesManagedFocusRecovery`). `OwnedWindowRegistry` (in `App/`) is now a thin facade over `SurfaceCoordinator.shared`.
 
@@ -852,7 +878,7 @@ AXEventHandler → LayoutRefreshController.requestRelayout(.axWindowCreated)  [S
     v
 LayoutRefreshController.executeEffectPlan → AXManager.applyFramesParallel
     │  per-pid batch → AppAXContext.setFramesBatch on the app's AX thread
-    │  AXFrameApplicationLedger verifies / retries / learns size quantum
+    │  AXFrameApplicationLedger verifies / retries / settles exact convergence
     v
 SurfaceReconciler.noteWorldChanged → WorldView → border/bar diff-applied [STAGE 4]
 ```
@@ -949,7 +975,7 @@ CLIRenderer displays the result
 | `LayoutRefreshController` | The effector: schedules refreshes, runs the display-link loop, executes `EffectPlan`s. |
 | `RefreshReason` / `RefreshRequestRoute` | Why a refresh was requested, and which route it maps to (`fullRescan`/`relayout`/`immediateRelayout`/`visibilityRefresh`/`windowRemoval`). |
 | `AXManager` | Per-app AX frame writer; owns `AXFrameApplicationLedger`. `applyFramesParallel` = per-app thread fan-out. |
-| `AXFrameApplicationLedger` | Dedups, verifies, retries, and learns a per-window size quantum for frame writes. |
+| `AXFrameApplicationLedger` | Dedups, verifies, retries, and records exact accepted size convergence for frame writes. |
 | `SurfaceReconciler` | Stage 4: derives border/bars/tab-rails/native-fullscreen placeholders from `WorldView` and diff-applies them. |
 | `WorldView` | Read-only facade over world state used by `SurfaceDerivation`. |
 | `SurfaceCoordinator` / `SurfaceScene` | Registry + policy store for OmniWM-owned surfaces (hit-testing, capture exclusion, focus-recovery suppression). |

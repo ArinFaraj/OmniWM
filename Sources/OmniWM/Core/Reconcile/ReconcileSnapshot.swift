@@ -165,6 +165,7 @@ struct FocusSessionSnapshot: Equatable {
     var pendingManagedFocus: PendingManagedFocusSnapshot = .empty
     var lastTiledFocusedByWorkspace: [WorkspaceDescriptor.ID: WindowToken] = [:]
     var lastFloatingFocusedByWorkspace: [WorkspaceDescriptor.ID: WindowToken] = [:]
+    var lastFocusedByWorkspace: [WorkspaceDescriptor.ID: WindowToken] = [:]
     var lastTiledFocusedToken: WindowToken? = nil
     var tiledFocusHistory: [WindowToken] = []
     var focusLease: FocusPolicyLease? = nil
@@ -195,15 +196,39 @@ extension FocusSessionSnapshot {
         in workspaceId: WorkspaceDescriptor.ID,
         mode: TrackedWindowMode
     ) -> Bool {
+        var changed = false
+        if lastFocusedByWorkspace[workspaceId] != token {
+            lastFocusedByWorkspace[workspaceId] = token
+            changed = true
+        }
+        return rememberFocusFallback(token, in: workspaceId, mode: mode) || changed
+    }
+
+    @discardableResult
+    mutating func rememberFocusFallback(
+        _ token: WindowToken,
+        in workspaceId: WorkspaceDescriptor.ID,
+        mode: TrackedWindowMode
+    ) -> Bool {
+        guard focusFallbackToken(in: workspaceId, mode: mode) != token else { return false }
         switch mode {
         case .tiling:
-            guard lastTiledFocusedByWorkspace[workspaceId] != token else { return false }
             lastTiledFocusedByWorkspace[workspaceId] = token
-            return true
         case .floating:
-            guard lastFloatingFocusedByWorkspace[workspaceId] != token else { return false }
             lastFloatingFocusedByWorkspace[workspaceId] = token
-            return true
+        }
+        return true
+    }
+
+    func focusFallbackToken(
+        in workspaceId: WorkspaceDescriptor.ID,
+        mode: TrackedWindowMode
+    ) -> WindowToken? {
+        switch mode {
+        case .tiling:
+            lastTiledFocusedByWorkspace[workspaceId]
+        case .floating:
+            lastFloatingFocusedByWorkspace[workspaceId]
         }
     }
 
@@ -232,6 +257,10 @@ extension FocusSessionSnapshot {
                 lastFloatingFocusedByWorkspace[workspaceId] = nil
                 changed = true
             }
+            if lastFocusedByWorkspace[workspaceId] == token {
+                lastFocusedByWorkspace[workspaceId] = nil
+                changed = true
+            }
             return changed
         }
 
@@ -241,6 +270,10 @@ extension FocusSessionSnapshot {
         }
         for (id, rememberedToken) in lastFloatingFocusedByWorkspace where rememberedToken == token {
             lastFloatingFocusedByWorkspace[id] = nil
+            changed = true
+        }
+        for (id, rememberedToken) in lastFocusedByWorkspace where rememberedToken == token {
+            lastFocusedByWorkspace[id] = nil
             changed = true
         }
 
@@ -266,6 +299,10 @@ extension FocusSessionSnapshot {
         }
         for (workspaceId, token) in lastFloatingFocusedByWorkspace where token == oldToken {
             lastFloatingFocusedByWorkspace[workspaceId] = newToken
+            changed = true
+        }
+        for (workspaceId, token) in lastFocusedByWorkspace where token == oldToken {
+            lastFocusedByWorkspace[workspaceId] = newToken
             changed = true
         }
 
@@ -337,6 +374,7 @@ struct ReconcileWindowSnapshot: Equatable {
     let observedState: ObservedWindowState
     let desiredState: DesiredWindowState
     let restoreIntent: RestoreIntent?
+    let interactionPolicy: WindowInteractionPolicy
 }
 
 struct ReconcileSnapshot: Equatable {

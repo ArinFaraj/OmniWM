@@ -58,6 +58,7 @@ struct SettingsExport: Equatable {
 
     var hotkeyBindings: [HotkeyBinding]
     var systemHyperTrigger: SystemHyperTrigger
+    var hyperKeyModifiers: HyperKeyModifiers
 
     var workspaceBarEnabled: Bool
     var workspaceBarShowLabels: Bool
@@ -102,6 +103,7 @@ struct SettingsExport: Equatable {
     var scrollGestureEnabled: Bool
     var scrollSensitivity: Double
     var scrollModifierKey: String
+    var mouseMoveModifierKey: String
     var mouseResizeModifierKey: String
     var gestureFingerCount: Int
     var gestureInvertDirection: Bool
@@ -180,6 +182,7 @@ extension SettingsExport {
             overviewSelectedBorderColor: SettingsColor(red: 0.3, green: 0.8, blue: 0.4, alpha: 1.0),
             hotkeyBindings: HotkeyBindingRegistry.defaults(),
             systemHyperTrigger: .default,
+            hyperKeyModifiers: .default,
             workspaceBarEnabled: true,
             workspaceBarShowLabels: true,
             workspaceBarShowFloatingWindows: false,
@@ -219,6 +222,7 @@ extension SettingsExport {
             scrollGestureEnabled: true,
             scrollSensitivity: 5.0,
             scrollModifierKey: ScrollModifierKey.optionShift.rawValue,
+            mouseMoveModifierKey: MouseMoveModifierKey.option.rawValue,
             mouseResizeModifierKey: MouseResizeModifierKey.option.rawValue,
             gestureFingerCount: GestureFingerCount.three.rawValue,
             gestureInvertDirection: true,

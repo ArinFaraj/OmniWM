@@ -231,6 +231,15 @@ final class WorldStore {
 
         case let .windowRekeyed(from, to, workspaceId, _, _, newAXRef, metadata, _):
             guard phase == .beforePlan else { return }
+            let previousSpaceId = from.windowId == to.windowId
+                ? nil
+                : spaceTopology.windowSpace.removeValue(forKey: from.windowId)
+            if spaceTopology.windowSpace[to.windowId] == nil,
+               let previousSpaceId,
+               spaceTopology.isKnownSpace(previousSpaceId)
+            {
+                spaceTopology.windowSpace[to.windowId] = previousSpaceId
+            }
             model.rekeyWindow(
                 from: from,
                 to: to,
@@ -243,6 +252,7 @@ final class WorldStore {
         case let .windowRemoved(token, _, _):
             guard phase == .afterPlan else { return }
             model.removeWindow(key: token)
+            spaceTopology.windowSpace.removeValue(forKey: token.windowId)
             reconcileNiriMembership(for: token, keeping: nil, monitors: monitors)
 
         case let .workspaceAssigned(token, _, to, _, _):
@@ -318,6 +328,7 @@ final class WorldStore {
             spaceTopology = topology
 
         case .activeSpaceChanged,
+             .focusFallbackRemembered,
              .focusForgotten,
              .focusLeaseChanged,
              .focusRemembered,
@@ -388,6 +399,10 @@ extension WorldStore {
         model.entries(forPid: pid)
     }
 
+    func hasEntries(forPid pid: pid_t) -> Bool {
+        model.hasEntries(forPid: pid)
+    }
+
     func windows(in workspace: WorkspaceDescriptor.ID) -> [WindowState] {
         model.windows(in: workspace)
     }
@@ -442,6 +457,10 @@ extension WorldStore {
 
     func admissionHints(for token: WindowToken) -> ManagedWindowAdmissionHints? {
         model.admissionHints(for: token)
+    }
+
+    func setInteractionPolicy(_ policy: WindowInteractionPolicy, for token: WindowToken) {
+        model.setInteractionPolicy(policy, for: token)
     }
 
     func hiddenState(for token: WindowToken) -> HiddenState? {
@@ -891,16 +910,5 @@ extension WorldStore {
     @discardableResult
     func setObservedMinSize(_ size: CGSize, for token: WindowToken) -> Bool {
         model.setObservedMinSize(size, for: token)
-    }
-
-    func confirmedMissingKeys(
-        keys activeKeys: Set<WindowToken>,
-        requiredConsecutiveMisses: Int = 1
-    ) -> [WindowToken] {
-        model.confirmedMissingKeys(
-            keys: activeKeys,
-            requiredConsecutiveMisses: requiredConsecutiveMisses,
-            spaceTopology: spaceTopology
-        )
     }
 }

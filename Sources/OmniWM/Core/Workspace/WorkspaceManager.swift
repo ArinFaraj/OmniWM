@@ -60,6 +60,7 @@ final class WorkspaceManager {
     var onGapsChanged: (() -> Void)?
     var onSessionStateChanged: (() -> Void)?
     var onRuntimeInvalidation: ((WorkspaceDescriptor.ID?, InvalidationDomain) -> Void)?
+    var onWindowPresenceObserved: ((WindowHandle) -> Void)?
     var onWindowRemoved: ((WindowState) -> Void)?
     var onDeferredWorkspaceMonitorMove: ((WorkspaceMonitorMoveOutcome) -> Void)?
 
@@ -100,7 +101,8 @@ final class WorkspaceManager {
                     lifecyclePhase: entry.lifecyclePhase,
                     observedState: entry.observedState,
                     desiredState: entry.desiredState,
-                    restoreIntent: entry.restoreIntent
+                    restoreIntent: entry.restoreIntent,
+                    interactionPolicy: entry.interactionPolicy
                 )
             }
 
@@ -266,6 +268,7 @@ final class WorkspaceManager {
         let current = world.focus
         return current.lastTiledFocusedByWorkspace != previous.lastTiledFocusedByWorkspace
             || current.lastFloatingFocusedByWorkspace != previous.lastFloatingFocusedByWorkspace
+            || current.lastFocusedByWorkspace != previous.lastFocusedByWorkspace
             || current.lastTiledFocusedToken != previous.lastTiledFocusedToken
             || current.nonManagedFocusToken != previous.nonManagedFocusToken
             || current.suppressedFocusToken != previous.suppressedFocusToken
@@ -384,6 +387,7 @@ final class WorkspaceManager {
              .topologyChanged:
             return true
         case .floatingGeometryUpdated,
+             .focusFallbackRemembered,
              .focusForgotten,
              .focusLeaseChanged,
              .focusRemembered,
@@ -1341,12 +1345,8 @@ final class WorkspaceManager {
     @discardableResult
     func rememberFocus(_ token: WindowToken, in workspaceId: WorkspaceDescriptor.ID) -> Bool {
         let mode = windowMode(for: token) ?? .tiling
-        let changed = switch mode {
-        case .tiling:
-            world.focus.lastTiledFocusedByWorkspace[workspaceId] != token
-        case .floating:
-            world.focus.lastFloatingFocusedByWorkspace[workspaceId] != token
-        }
+        let changed = world.focus.lastFocusedByWorkspace[workspaceId] != token
+            || world.focus.focusFallbackToken(in: workspaceId, mode: mode) != token
         guard changed else { return false }
         recordReconcileEvent(
             .focusRemembered(
@@ -1360,12 +1360,18 @@ final class WorkspaceManager {
     }
 
     @discardableResult
-    func syncWorkspaceFocus(
-        _ token: WindowToken,
-        in workspaceId: WorkspaceDescriptor.ID,
-        onMonitor _: Monitor.ID? = nil
-    ) -> Bool {
-        rememberFocus(token, in: workspaceId)
+    private func rememberFocusFallback(_ token: WindowToken, in workspaceId: WorkspaceDescriptor.ID) -> Bool {
+        let mode = windowMode(for: token) ?? .tiling
+        guard world.focus.focusFallbackToken(in: workspaceId, mode: mode) != token else { return false }
+        recordReconcileEvent(
+            .focusFallbackRemembered(
+                token: token,
+                workspaceId: workspaceId,
+                mode: mode,
+                source: .workspaceManager
+            )
+        )
+        return true
     }
 
     @discardableResult
@@ -1373,7 +1379,7 @@ final class WorkspaceManager {
         nodeId: NodeId?,
         focusedToken: WindowToken?,
         in workspaceId: WorkspaceDescriptor.ID,
-        onMonitor monitorId: Monitor.ID? = nil
+        onMonitor _: Monitor.ID? = nil
     ) -> Bool {
         var changed = false
 
@@ -1392,11 +1398,7 @@ final class WorkspaceManager {
         }
 
         if let focusedToken {
-            changed = syncWorkspaceFocus(
-                focusedToken,
-                in: workspaceId,
-                onMonitor: monitorId
-            ) || changed
+            changed = rememberFocus(focusedToken, in: workspaceId) || changed
         }
 
         return changed
@@ -1432,7 +1434,7 @@ final class WorkspaceManager {
                 for: patch.workspaceId,
                 domains: .focusCommit
             ) {
-                changed = rememberFocus(rememberedFocusToken, in: patch.workspaceId) || changed
+                changed = rememberFocusFallback(rememberedFocusToken, in: patch.workspaceId) || changed
             }
         }
 
@@ -1480,6 +1482,13 @@ final class WorkspaceManager {
     }
 
     func resolveWorkspaceFocusToken(in workspaceId: WorkspaceDescriptor.ID) -> WindowToken? {
+        if let mostRecent = world.focus.lastFocusedByWorkspace[workspaceId],
+           let mode = windowMode(for: mostRecent),
+           let remembered = eligibleFocusCandidate(mostRecent, in: workspaceId, mode: mode)
+        {
+            return remembered
+        }
+
         if let remembered = eligibleFocusCandidate(
             world.focus.lastTiledFocusedByWorkspace[workspaceId],
             in: workspaceId,
@@ -2081,6 +2090,9 @@ final class WorkspaceManager {
                 source: .workspaceManager
             )
         )
+        if let handle = world.handle(for: token) {
+            onWindowPresenceObserved?(handle)
+        }
         return token
     }
 
@@ -2191,6 +2203,10 @@ final class WorkspaceManager {
         world.entries(forPid: pid)
     }
 
+    func hasEntries(forPid pid: pid_t) -> Bool {
+        world.hasEntries(forPid: pid)
+    }
+
     func entry(forWindowId windowId: Int) -> WindowState? {
         world.entry(forWindowId: windowId)
     }
@@ -2236,6 +2252,10 @@ final class WorkspaceManager {
 
     func admissionHints(for token: WindowToken) -> ManagedWindowAdmissionHints? {
         world.admissionHints(for: token)
+    }
+
+    func setInteractionPolicy(_ policy: WindowInteractionPolicy, for token: WindowToken) {
+        world.setInteractionPolicy(policy, for: token)
     }
 
     func setNiriRestorePlacements(_ placements: [WindowToken: PersistedNiriPlacement]) {
@@ -2438,23 +2458,6 @@ final class WorkspaceManager {
             CGRect(origin: origin, size: floatingState.lastFrame.size),
             in: visibleFrame
         )
-    }
-
-    @discardableResult
-    func confirmedMissingEntries(
-        keys activeKeys: Set<WindowToken>,
-        requiredConsecutiveMisses: Int = 1
-    ) -> [WindowState] {
-        let confirmedMissingKeys = world.confirmedMissingKeys(
-            keys: activeKeys,
-            requiredConsecutiveMisses: requiredConsecutiveMisses
-        )
-        return confirmedMissingKeys.compactMap { world.entry(for: $0) }.sorted {
-            if $0.pid == $1.pid {
-                return $0.windowId < $1.windowId
-            }
-            return $0.pid < $1.pid
-        }
     }
 
     @discardableResult
@@ -3276,6 +3279,7 @@ final class WorkspaceManager {
         let rememberedIds = toRemove.filter {
             world.focus.lastTiledFocusedByWorkspace[$0] != nil
                 || world.focus.lastFloatingFocusedByWorkspace[$0] != nil
+                || world.focus.lastFocusedByWorkspace[$0] != nil
         }
         if !rememberedIds.isEmpty {
             recordReconcileEvent(.focusForgotten(workspaceIds: rememberedIds, source: .workspaceManager))
@@ -3923,7 +3927,8 @@ extension WorkspaceManager {
                 domains: .focus
             )
 
-        case let .focusRemembered(_, workspaceId, _, _):
+        case let .focusRemembered(_, workspaceId, _, _),
+             let .focusFallbackRemembered(_, workspaceId, _, _):
             noteInvalidation(workspaceId: workspaceId, domains: .focus)
 
         case .focusForgotten,

@@ -21,6 +21,10 @@ enum ManagedWindowDestroyDisposition {
 }
 
 extension AXEventHandler {
+    func isCreatedWindowDeferred(_ windowId: UInt32) -> Bool {
+        deferredCreatedWindowIds.contains(windowId)
+    }
+
     func isAdmissionQuarantined(windowId: Int, axRef: AXWindowRef) -> Bool {
         guard let quarantine = admissionQuarantineByWindowId[windowId] else { return false }
         guard CFEqual(quarantine.axRef.element, axRef.element)
@@ -41,10 +45,19 @@ extension AXEventHandler {
         failedPIDs: Set<pid_t> = [],
         sizeConstraints: WindowSizeConstraints? = nil
     ) -> FullRescanIdentityResolution {
-        guard let controller,
-              let existingEntry = controller.workspaceManager.entry(forWindowId: windowId)
-        else {
+        guard let controller else {
             return .process(nil)
+        }
+        let token = WindowToken(pid: pid, windowId: windowId)
+        guard let existingEntry = controller.workspaceManager.entry(forWindowId: windowId) else {
+            guard let sourceToken = pendingFullRescanIdentityRebindSource(
+                for: token,
+                axRef: axRef,
+                controller: controller
+            ) else {
+                return .process(nil)
+            }
+            return .preserve(sourceToken)
         }
         let isSameElement = CFEqual(existingEntry.axRef.element, axRef.element)
         let isKnownAlias = isKnownAXIdentityAlias(windowId: windowId, axRef: axRef)
@@ -57,7 +70,6 @@ extension AXEventHandler {
         {
             return .preserve(existingEntry.token)
         }
-        let token = WindowToken(pid: pid, windowId: windowId)
         if existingEntry.token == token, isSameElement {
             return .process(existingEntry)
         }
@@ -77,6 +89,26 @@ extension AXEventHandler {
         return .process(rekeyedEntry)
     }
 
+    private func pendingFullRescanIdentityRebindSource(
+        for targetToken: WindowToken,
+        axRef: AXWindowRef,
+        controller: WMController
+    ) -> WindowToken? {
+        guard let windowId = UInt32(exactly: targetToken.windowId),
+              let state = admissionRetryStateByWindowId[windowId],
+              !state.exhausted,
+              !state.identityRebindTargetDestroyed,
+              case let .identityRebind(oldWindow, newWindow, _, _, _) = state.trigger,
+              newWindow.token == targetToken,
+              sameAXWindowIdentity(newWindow.axRef, axRef),
+              let sourceEntry = controller.workspaceManager.entry(for: oldWindow.token),
+              sameAXWindowIdentity(sourceEntry.axRef, oldWindow.axRef)
+        else {
+            return nil
+        }
+        return oldWindow.token
+    }
+
     func updateIdentityAliases(
         _ aliasesByWindowId: [Int: FullRescanWindowIdentityAliases]
     ) {
@@ -91,6 +123,37 @@ extension AXEventHandler {
         identityAliasesByWindowId = identityAliasesByWindowId.filter {
             retainingWindowIds.contains($0.key)
         }
+    }
+
+    func fullRescanIdentityDependencyPIDsByWindowId(
+        entries: [WindowState]
+    ) -> [Int: Set<pid_t>] {
+        var result = identityAliasesByWindowId.reduce(into: [Int: Set<pid_t>]()) { result, element in
+            if !element.value.pids.isEmpty {
+                result[element.key] = element.value.pids
+            }
+        }
+        for entry in entries {
+            if let pid = AXWindowService.processIdentifier(entry.axRef) {
+                result[entry.windowId, default: []].insert(pid)
+            }
+        }
+        return result
+    }
+
+    func fullRescanTargetPIDsDepending(
+        onTerminatedPID terminatedPID: pid_t,
+        entries: [WindowState]
+    ) -> Set<pid_t> {
+        let dependencyPIDsByWindowId = fullRescanIdentityDependencyPIDsByWindowId(entries: entries)
+        return Set(entries.compactMap { entry in
+            guard entry.pid != terminatedPID,
+                  dependencyPIDsByWindowId[entry.windowId]?.contains(terminatedPID) == true
+            else {
+                return nil
+            }
+            return entry.pid
+        })
     }
 
     func managedWindowToken(_ token: WindowToken, matchesObservedPid pid: pid_t) -> Bool {
@@ -178,6 +241,7 @@ extension AXEventHandler {
             return false
         }
         cancelCreatedWindowRetry(windowId: windowId)
+        discardDeferredReplacementProtection(windowId: windowId)
         return true
     }
 
@@ -226,9 +290,7 @@ extension AXEventHandler {
         {
             return false
         }
-        if let admissionWindowId = UInt32(exactly: windowId),
-           createPlacementContextsByWindowId[admissionWindowId] != nil
-        {
+        if pendingCreatePlacementContext(for: windowId) != nil {
             return false
         }
         return true

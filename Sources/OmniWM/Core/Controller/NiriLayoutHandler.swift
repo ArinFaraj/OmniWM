@@ -395,6 +395,42 @@ enum StructuralMutationOutcome: Equatable {
         requestLayoutCommandRelayout(in: workspaceId)
     }
 
+    func activatePointerHoveredWindow(
+        _ window: NiriWindow,
+        in workspaceId: WorkspaceDescriptor.ID
+    ) {
+        guard let controller, let engine = controller.niriEngine else { return }
+        var shouldStartScrollAnimation = false
+        var shouldRequestRelayout = false
+
+        controller.workspaceManager.withNiriViewportState(for: workspaceId) { state in
+            activateNode(
+                window,
+                in: workspaceId,
+                state: &state,
+                options: .init(
+                    layoutRefresh: false,
+                    axFocus: false,
+                    startAnimation: false
+                )
+            )
+            shouldStartScrollAnimation = state.hasPendingOffsetAnimation
+            shouldRequestRelayout = state.offsetTransition.kind == .jump
+        }
+
+        controller.focusWindow(window.token, origin: .pointerHover)
+
+        if shouldStartScrollAnimation {
+            startScrollAnimationIfNeeded(
+                for: workspaceId,
+                state: controller.workspaceManager.niriViewportState(for: workspaceId),
+                engine: engine
+            )
+        } else if shouldRequestRelayout {
+            requestLayoutCommandRelayout(in: workspaceId)
+        }
+    }
+
     func layoutWithNiriEngine(
         activeWorkspaces: Set<WorkspaceDescriptor.ID>,
         useScrollAnimationPath: Bool = false,
@@ -860,7 +896,6 @@ enum StructuralMutationOutcome: Equatable {
         }
 
         if !usesSingleWindowFit,
-           removal.externallyRemovedColumn,
            removal.removalResult.removedColumnIndicesBefore.isEmpty,
            pass.engine.correctViewportAfterColumnRemoval(
                in: pass.wsId,
@@ -1150,6 +1185,22 @@ enum StructuralMutationOutcome: Equatable {
             canRestoreHiddenWorkspaceWindows: snapshot.isActiveWorkspace,
             reassertHidden: true
         )
+        let startsAnimation = directives.contains {
+            if case .startNiriScroll = $0 { return true }
+            return false
+        }
+        let hasPendingAnimationWork = controller.map {
+            hasPendingNiriAnimationWork(
+                state: state,
+                driver: $0.workspaceManager.animationDriver,
+                engine: pass.engine,
+                workspaceId: pass.wsId
+            )
+        } == true
+        let hasRegisteredAnimation = hasScrollAnimation(for: pass.wsId)
+        if hasPendingAnimationWork, !startsAnimation, !hasRegisteredAnimation {
+            directives.append(.startNiriScroll(workspaceId: pass.wsId))
+        }
         return WorkspaceLayoutPlan(
             workspaceId: pass.wsId,
             monitor: snapshot.monitor,

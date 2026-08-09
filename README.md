@@ -118,6 +118,23 @@
       <sub>@janhesters</sub>
     </td>
     <td align="center" valign="top">
+      <a href="https://github.com/spotify">
+        <img src="https://avatars.githubusercontent.com/u/251374?v=4" width="72" alt="Spotify">
+      </a>
+      <br>
+      <a href="https://github.com/spotify"><strong>Spotify</strong></a>
+      <br>
+      <sub>━━━━━━━━</sub>
+      <br>
+      <a href="https://github.com/Cy6erBr4in" title="Alexander Dergachev">
+        <img src="https://github.com/Cy6erBr4in.png?size=96" width="72" alt="Alexander Dergachev">
+      </a>
+      <br>
+      <a href="https://github.com/Cy6erBr4in"><strong>Alexander Dergachev</strong></a>
+      <br>
+      <sub>@Cy6erBr4in</sub>
+    </td>
+    <td align="center" valign="top">
       <a href="https://www.vhf.com">
         <img src="https://www.google.com/s2/favicons?domain=www.vhf.com&sz=96" width="72" alt="vhf">
       </a>
@@ -228,6 +245,9 @@
       <a href="https://github.com/Guria" title="Aleksei Gurianov">
         <img src="https://github.com/Guria.png?size=96" width="72" alt="Aleksei Gurianov">
       </a>
+      <a href="https://github.com/Cy6erBr4in" title="Alexander Dergachev">
+        <img src="https://github.com/Cy6erBr4in.png?size=96" width="72" alt="Alexander Dergachev">
+      </a>
       <a href="https://github.com/gloomy-breaker" title="Ayaan Sandhu">
         <img src="https://github.com/gloomy-breaker.png?size=96" width="72" alt="Ayaan Sandhu">
       </a>
@@ -301,7 +321,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/macOS-26.0%2B-green?logo=apple&logoColor=white" alt="macOS">
   <img src="https://img.shields.io/badge/Apple%20Silicon-supported-green?logo=apple&logoColor=white" alt="Apple Silicon">
-  <img src="https://img.shields.io/badge/Claude%20Code-Assisted-green?logo=claude&logoColor=white" alt="Claude Code">
+  <img src="https://custom-icon-badges.demolab.com/badge/OpenAI-Assisted-green?logo=openai&logoColor=white" alt="OpenAI Assisted">
 </p>
 <p align="center">
   <a href="https://trendshift.io/repositories/16758" target="_blank"><img src="https://trendshift.io/api/badge/repositories/16758" alt="BarutSRB%2FOmniWM | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
@@ -458,7 +478,7 @@ Use the `Toggle Workspace Layout` shortcut below to switch layouts per workspace
 
 ### Keyboard Shortcuts
 
-All shortcuts are customizable in Settings > Hotkeys. `Hyper` is the literal `Control + Option + Shift + Command` chord. Optionally pick a **System Hyper Trigger** — a single key (Caps Lock, F13–F20, or a left- or right-side modifier) or an extra mouse button that acts as `Hyper` while held (this needs Input Monitoring permission). Leave the trigger as `None` if you already produce `Hyper` another way, such as a Karabiner Elements remap. The tables below list all the default hotkeys:
+All shortcuts are customizable in Settings > Hotkeys. `Hyper` is the literal `Control + Option + Shift + Command` chord by default; which modifiers make up `Hyper` is configurable in Settings > Hotkeys (for example, exclude `Shift` to keep `Hyper + Shift + …` free for extra bindings). Changing the combination retargets every shortcut that currently resolves to `Hyper` onto the new one, so the shortcut list updates in place as you toggle the modifiers. Optionally pick a **System Hyper Trigger** — a single key (Caps Lock, F13–F20, or a left- or right-side modifier) or an extra mouse button that acts as `Hyper` while held (this needs Input Monitoring permission). Leave the trigger as `None` if you already produce `Hyper` another way, such as a Karabiner Elements remap. The tables below list all the default hotkeys:
 
 Layout legend:
 - `Shared` works in any active layout.
@@ -514,8 +534,11 @@ Layout legend:
 | Focus Previous Monitor | `Unassigned` | `Shared` |
 | Focus Last Monitor | `` Control + Command + ` `` | `Shared` |
 | Move Workspace to Left / Right / Up / Down Monitor | `Unassigned` | `Shared` |
+| Move Window to Left / Right / Up / Down Monitor | `Unassigned` | `Shared` |
 
 The workspace-to-monitor actions target the active workspace and intentionally use the same temporary runtime override as `omniwmctl workspace move-to-monitor --force`. They do not rewrite the workspace's Home Monitor or swap workspaces, and unsafe fullscreen, hidden-app, scratchpad, or focus states still block the move.
+
+The window-to-monitor actions send the focused window directly to the current workspace on the adjacent routed display, independently of **Move Window Across Monitor at Edge**. They do not wrap when no monitor exists in that direction. **Follow Window to Monitor** controls whether focus follows the window; when it is off, you remain in the source workspace.
 
 #### Layout
 
@@ -600,10 +623,11 @@ A true quake/sticky terminal (powered by Ghostty's libghostty) that slides in fr
 
 #### Command Palette
 
-Quickly search windows or app menus from one shared palette:
+Quickly search windows, app menus, or clipboard history from one shared palette:
 - Open it from the global shortcut shown in `Keyboard Shortcuts`
-- Use `Cmd + 1` for `Windows` and `Cmd + 2` for `Menu` when menu search is available
-- Type to fuzzy-search by window title, app name, or menu item
+- Use `Tab` / `Shift + Tab` to cycle forward or backward through the available modes
+- Use `Cmd + 1` for `Windows`, `Cmd + 2` for `Menu`, and `Cmd + 3` for `Clipboard`
+- Type to fuzzy-search by window title, app name, menu item, or clipboard content
 - Menu results always show keyboard shortcuts when available
 - `Up` / `Down` move the selection
 - `Enter` activates the selected result
@@ -666,7 +690,7 @@ Conceal selected menu-bar icons and reach them from a panel:
 
 - **Workspaces** - Create named workspaces in Settings to organize by project or context (You can use emojis 🥳)
 - **App Rules** - Exclude problematic apps from tiling or assign them to specific workspaces
-- **Mouse** - On the desktop, `Option + drag` swaps tiled windows and `Option + Shift + drag` inserts into a Niri column; in Overview, `Option + drag` targets a workspace, window position, or Niri column gap
+- **Mouse** - On the Niri desktop, hold the configured mouse-move modifier and drag to swap tiled windows; add `Shift` to insert into a column. The modifier defaults to `Option` and can be changed or disabled in **Settings → Mouse & Trackpad**. In Overview, `Option + drag` targets a workspace, window position, or Niri column gap
 - **Mouse Resize** - Hold `Option` and right-drag a tiled window to resize (Niri)
 - **Scroll Gestures (Mouse)** - Hold `Option + Shift + Mouse Scroll Wheel` (default, configurable) and scroll through columns horizontally
 - **Trackpad Gestures** - Use horizontal gestures with 2/3/4 fingers (configurable); direction can be inverted (local hardware validation is limited)
@@ -688,7 +712,7 @@ OmniWM stores its editable config at `${XDG_CONFIG_HOME:-$HOME/.config}/omniwm/s
 Configure per-application behavior in Settings > App Rules:
 
 - **Always Float** - Force specific apps to always float (e.g., calculators, preferences windows)
-- **Assign to Workspace** - Open first matching app windows on a specific workspace; later windows follow the app's current workspace unless rules are explicitly applied
+- **Assign to Workspace** - Use a valid workspace assignment as the initial default whenever the matching app currently has no tracked windows. Additional windows open on the workspace active when creation began. Automatic rule reevaluation leaves managed windows in place, while explicit rule application can move them. Readmission, structural replacements, tracked transient children, and unique persisted boot-restore matches preserve their existing placement continuity.
 - **Initial Container Primary Span (Niri)** - Start matching resizable windows at 5–100% when they create or claim a new container; the container remains freely resizable afterward
 - **Minimum Size** - Prevent the layout engine from sizing windows below a threshold
 

@@ -8,21 +8,54 @@ enum WindowAdmissionPendingReason: String, Equatable {
     case windowInfoMissing = "window_info_missing"
     case axWindowMissing = "ax_window_missing"
     case factsDeferred = "facts_deferred"
+    case windowServerEvidenceMissing = "window_server_evidence_missing"
     case degenerateGeometry = "degenerate_geometry"
+
+    var suppressesNonManagedFocusTarget: Bool {
+        self == .windowServerEvidenceMissing
+    }
 }
 
 enum WindowAdmissionRejectionReason: String, Equatable {
     case invalidIdentity = "invalid_identity"
     case ownedWindow = "owned_window"
     case policyIgnored = "policy_ignored"
+    case nonRenderableTransientSurface = "non_renderable_transient_surface"
     case quarantined = "quarantined"
     case retryExhausted = "retry_exhausted"
     case terminalFrameRefusal = "terminal_frame_refusal"
+
+    var suppressesNonManagedFocusTarget: Bool {
+        self == .nonRenderableTransientSurface
+    }
+}
+
+extension WindowDecision {
+    @MainActor
+    var admissionPendingReason: WindowAdmissionPendingReason {
+        deferredReason == .windowServerEvidenceMissing ? .windowServerEvidenceMissing : .factsDeferred
+    }
+
+    @MainActor
+    var admissionRejectionReason: WindowAdmissionRejectionReason {
+        isNonRenderableTransientSurfaceDecision ? .nonRenderableTransientSurface : .policyIgnored
+    }
+}
+
+extension WindowServerInfo {
+    func token(matching windowId: UInt32) -> WindowToken? {
+        guard id == windowId else { return nil }
+        return WindowToken(pid: pid_t(pid), windowId: Int(windowId))
+    }
 }
 
 enum AdmissionRetryTrigger {
     case create
-    case candidate(token: WindowToken, axRef: AXWindowRef)
+    case candidate(
+        token: WindowToken,
+        axRef: AXWindowRef,
+        placementOrigin: WorkspacePlacementOrigin = .liveCreate
+    )
     case focused(
         token: WindowToken,
         source: ActivationEventSource,
@@ -43,6 +76,13 @@ enum AdmissionRetryTrigger {
         return false
     }
 
+    var placementOrigin: WorkspacePlacementOrigin {
+        guard case let .candidate(_, _, placementOrigin) = self else {
+            return .liveCreate
+        }
+        return placementOrigin
+    }
+
     var priority: Int {
         switch self {
         case .create:
@@ -56,6 +96,24 @@ enum AdmissionRetryTrigger {
         case .identityRebind:
             4
         }
+    }
+
+    var protectionPIDs: Set<pid_t> {
+        switch self {
+        case .create:
+            []
+        case let .candidate(token, _, _),
+             let .focused(token, _, _, _),
+             let .ruleReevaluation(token, _):
+            [token.pid]
+        case let .identityRebind(oldWindow, newWindow, _, _, _):
+            [oldWindow.token.pid, newWindow.token.pid]
+        }
+    }
+
+    var protectsMissingEntriesDuringAdmission: Bool {
+        if case .ruleReevaluation = self { return false }
+        return true
     }
 }
 
@@ -109,6 +167,13 @@ struct AdmissionRetrySchedule {
     let axRef: AXWindowRef?
     let reason: WindowAdmissionPendingReason
     let trigger: AdmissionRetryTrigger
+}
+
+struct DeferredReplacementProtection {
+    var protectedTokens: Set<WindowToken>
+    var scope: RescanScope
+    var fallbackProtectedTokens: Set<WindowToken> = []
+    var permitsPIDFallback = true
 }
 
 enum AdmissionIncarnationRelation: Equatable {
@@ -175,6 +240,10 @@ struct WindowIdentityAliasGeneration {
 struct WindowIdentityAliasHistory {
     private(set) var current: WindowIdentityAliasGeneration?
     private(set) var previous: WindowIdentityAliasGeneration?
+
+    var pids: Set<pid_t> {
+        (current?.pids ?? []).union(previous?.pids ?? [])
+    }
 
     mutating func commit(_ aliases: FullRescanWindowIdentityAliases) {
         previous = current

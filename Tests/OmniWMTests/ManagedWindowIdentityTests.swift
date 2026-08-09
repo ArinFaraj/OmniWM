@@ -193,6 +193,11 @@ final class ManagedWindowIdentityTests: XCTestCase {
         )
         waitingState.executionPhase = .waiting
         controller.axEventHandler.admissionRetryStateByWindowId[pending.windowId] = waitingState
+        controller.axEventHandler.protectDeferredReplacement(
+            windowId: pending.windowId,
+            token: pending.oldWindow.token,
+            scope: .all
+        )
 
         guard case let .waitingIdentityRebindTarget(generation, oldWindow, newWindow) =
             controller.axEventHandler.managedWindowDestroyDisposition(
@@ -213,6 +218,10 @@ final class ManagedWindowIdentityTests: XCTestCase {
         )
 
         XCTAssertNil(controller.axEventHandler.admissionRetryStateByWindowId[pending.windowId])
+        XCTAssertNil(
+            controller.axEventHandler
+                .deferredReplacementProtectionsByWindowId[pending.windowId]
+        )
         XCTAssertNotNil(controller.workspaceManager.entry(for: pending.oldWindow.token))
         XCTAssertNil(controller.workspaceManager.entry(for: pending.newWindow.token))
     }
@@ -222,6 +231,11 @@ final class ManagedWindowIdentityTests: XCTestCase {
         let pending = try makePendingRebind(controller: controller, suffix: 2)
         controller.axEventHandler.managedWindowIdentityRebindAcknowledgementProvider = { _, _ in true }
         controller.axEventHandler.managedWindowIdentityRebindFinalizationProvider = { _, _ in true }
+        controller.axEventHandler.protectDeferredReplacement(
+            windowId: pending.windowId,
+            token: pending.oldWindow.token,
+            scope: .all
+        )
 
         controller.axEventHandler.handleRemoved(
             pid: pending.newWindow.token.pid,
@@ -248,6 +262,10 @@ final class ManagedWindowIdentityTests: XCTestCase {
         XCTAssertNotNil(controller.workspaceManager.entry(for: pending.oldWindow.token))
         XCTAssertNil(controller.workspaceManager.entry(for: pending.newWindow.token))
         XCTAssertNil(controller.axEventHandler.admissionRetryStateByWindowId[pending.windowId])
+        XCTAssertNil(
+            controller.axEventHandler
+                .deferredReplacementProtectionsByWindowId[pending.windowId]
+        )
     }
 
     func testDestroyDuringIdentityRebindAcknowledgementPreservesOldWorldEntry() async throws {
@@ -595,6 +613,60 @@ final class ManagedWindowIdentityTests: XCTestCase {
         XCTAssertNil(controller.workspaceManager.entry(for: pending.oldWindow.token))
         XCTAssertNotNil(controller.workspaceManager.entry(for: pending.newWindow.token))
         XCTAssertNil(controller.axEventHandler.admissionRetryStateByWindowId[pending.windowId])
+    }
+
+    func testPendingRebindCarriesRestoredNativeFullscreenFrameApply() async throws {
+        let controller = WindowAdmissionTestSupport.controller()
+        let pending = try makePendingRebind(controller: controller, suffix: 12)
+        XCTAssertTrue(
+            controller.workspaceManager.requestNativeFullscreenEnter(
+                pending.oldWindow.token,
+                in: pending.workspaceId
+            )
+        )
+        XCTAssertTrue(
+            controller.workspaceManager.markNativeFullscreenSuspended(
+                pending.oldWindow.token
+            )
+        )
+
+        controller.layoutRefreshController.restoreNativeFullscreenAfterStructuralReplacement(
+            from: pending.oldWindow.token,
+            to: pending.newWindow.token,
+            appFullscreen: false
+        )
+
+        XCTAssertNil(
+            controller.workspaceManager.nativeFullscreenRecord(
+                for: pending.oldWindow.token
+            )
+        )
+        XCTAssertEqual(
+            controller.workspaceManager.layoutReason(for: pending.oldWindow.token),
+            .standard
+        )
+        controller.axEventHandler.managedWindowIdentityRebindAcknowledgementProvider = { _, _ in true }
+        controller.axEventHandler.managedWindowIdentityRebindFinalizationProvider = { _, _ in true }
+
+        await controller.axEventHandler.completeManagedWindowIdentityRebind(
+            from: pending.oldWindow,
+            to: pending.newWindow,
+            windowId: pending.windowId,
+            retryGeneration: pending.state.generation,
+            managedReplacementMetadata: nil,
+            admissionHints: nil
+        )
+
+        XCTAssertNil(controller.workspaceManager.entry(for: pending.oldWindow.token))
+        XCTAssertNotNil(controller.workspaceManager.entry(for: pending.newWindow.token))
+        XCTAssertFalse(
+            controller.layoutRefreshController
+                .consumeNativeFullscreenRestoredFrameApply(for: pending.oldWindow.token)
+        )
+        XCTAssertTrue(
+            controller.layoutRefreshController
+                .consumeNativeFullscreenRestoredFrameApply(for: pending.newWindow.token)
+        )
     }
 
     func testSameTokenReplacementCommitsNewAXIncarnationAndInvalidatesFrameState() async throws {

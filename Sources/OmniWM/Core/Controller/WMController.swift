@@ -151,6 +151,8 @@ final class WMController {
     @ObservationIgnored
     private var floatDemotionFirstSamplesByToken: [WindowToken: ContinuousClock.Instant] = [:]
     private static let floatDemotionStabilityInterval: Duration = .milliseconds(300)
+    private static let finderBundleId = "com.apple.finder"
+    private static let finderQuickLookSubrole = "Quick Look"
     @ObservationIgnored
     private var hiddenWorkspaceBarMonitorIds: Set<Monitor.ID> = []
     @ObservationIgnored
@@ -234,10 +236,7 @@ final class WMController {
         if let windowActionHandlerStorage {
             return windowActionHandlerStorage
         }
-        let handler = WindowActionHandler(
-            controller: self,
-            orderWindow: windowFocusOperations.orderWindow
-        )
+        let handler = WindowActionHandler(controller: self)
         windowActionHandlerStorage = handler
         return handler
     }
@@ -295,6 +294,9 @@ final class WMController {
         axManager.isWindowParked = { [workspaceManager] windowId in
             workspaceManager.entry(forWindowId: windowId)?.hiddenState != nil
         }
+        axManager.interactionPolicyForWindowId = { [workspaceManager] windowId in
+            workspaceManager.entry(forWindowId: windowId)?.interactionPolicy ?? .full
+        }
         intentLedger.seqProvider = { [eventIntake] in eventIntake.lastSeq }
         intentLedger.deadlineWheel = deadlineWheel
         focusPolicyEngine.intentLedger = intentLedger
@@ -330,6 +332,9 @@ final class WMController {
         }
         workspaceManager.onRuntimeInvalidation = { [weak self] workspaceId, domains in
             self?.handleRuntimeInvalidation(workspaceId: workspaceId, domains: domains)
+        }
+        workspaceManager.onWindowPresenceObserved = { [weak self] handle in
+            self?.layoutRefreshController.recordWindowPresence(handle)
         }
         workspaceManager.onWindowRemoved = { [weak self] entry in
             self?.windowActionHandlerStorage?.handleOverviewWindowRemoved(entry)
@@ -1075,7 +1080,7 @@ final class WMController {
     func updateWorkspaceConfig() {
         workspaceManager.applySettings()
         syncMonitorsToNiriEngine()
-        layoutRefreshController.requestFullRescan(reason: .workspaceConfigChanged)
+        layoutRefreshController.requestRelayout(reason: .workspaceConfigChanged)
     }
 
     func rebuildAppRulesCache() {
@@ -1246,9 +1251,10 @@ final class WMController {
         pid: pid_t,
         parentWindowId: UInt32? = nil,
         inheritTrackedParentWorkspace: Bool = false,
-        preferSameAppSiblingWorkspace: Bool = false,
         structuralReplacementWorkspaceId: WorkspaceDescriptor.ID? = nil,
-        restrictWorkspaceRuleToPlacementMonitor: Bool = true,
+        placementMode: TrackedWindowMode,
+        allowsFloatingSpawnPlacement: Bool = false,
+        placementOrigin: WorkspacePlacementOrigin = .liveCreate,
         createPlacementContext: WindowCreatePlacementContext? = nil,
         windowFrame: CGRect? = nil,
         fallbackWorkspaceId: WorkspaceDescriptor.ID?
@@ -1259,9 +1265,10 @@ final class WMController {
             pid: pid,
             parentWindowId: parentWindowId,
             inheritTrackedParentWorkspace: inheritTrackedParentWorkspace,
-            preferSameAppSiblingWorkspace: preferSameAppSiblingWorkspace,
             structuralReplacementWorkspaceId: structuralReplacementWorkspaceId,
-            restrictWorkspaceRuleToPlacementMonitor: restrictWorkspaceRuleToPlacementMonitor,
+            placementMode: placementMode,
+            allowsFloatingSpawnPlacement: allowsFloatingSpawnPlacement,
+            origin: placementOrigin,
             createPlacementContext: createPlacementContext,
             windowFrame: windowFrame,
             existingEntry: nil,
@@ -1296,26 +1303,16 @@ final class WMController {
         return windowServer.hasModalTag || windowServer.hasTransientSurfaceEvidence
     }
 
-    func shouldPreferSameAppSiblingWorkspace(
+    func allowsFloatingSpawnPlacement(
         for evaluation: WindowDecisionEvaluation,
-        inheritTrackedParentWorkspace: Bool
+        mode: TrackedWindowMode
     ) -> Bool {
-        guard let workspaceName = evaluation.decision.workspaceName,
-              workspaceManager.workspaceId(for: workspaceName, createIfMissing: false) != nil,
-              evaluation.decision.disposition == .managed,
-              !inheritTrackedParentWorkspace
-        else {
-            return false
-        }
-
-        let axFacts = evaluation.facts.ax
-        guard axFacts.attributeFetchSucceeded,
-              axFacts.role == kAXWindowRole as String
-        else {
-            return false
-        }
-
-        return axFacts.subrole == nil || axFacts.subrole == kAXStandardWindowSubrole as String
+        let ax = evaluation.facts.ax
+        return mode == .floating
+            && ax.attributeFetchSucceeded
+            && ax.bundleId == Self.finderBundleId
+            && ax.role == kAXWindowRole as String
+            && ax.subrole == Self.finderQuickLookSubrole
     }
 
     private func resolvedAppInfo(for pid: pid_t) -> AppInfoCache.AppInfo? {
@@ -1340,9 +1337,18 @@ final class WMController {
 
         let target = refusal.targetFrame.size
         let observed = refusal.observedFrame.size
+        let existing = workspaceManager.observedMinSize(for: token) ?? CGSize(width: 1, height: 1)
         let observedMin = CGSize(
-            width: observed.width > target.width + FrameTolerance.frameWrite ? observed.width : 1,
-            height: observed.height > target.height + FrameTolerance.frameWrite ? observed.height : 1
+            width: Self.updatedObservedMinimumAxis(
+                existing: existing.width,
+                target: target.width,
+                observed: observed.width
+            ),
+            height: Self.updatedObservedMinimumAxis(
+                existing: existing.height,
+                target: target.height,
+                observed: observed.height
+            )
         )
         guard observedMin.width > 1 || observedMin.height > 1 else { return }
 
@@ -1351,6 +1357,16 @@ final class WMController {
             reason: .observedConstraintsChanged,
             affectedWorkspaceIds: [entry.workspaceId]
         )
+    }
+
+    private static func updatedObservedMinimumAxis(
+        existing: CGFloat,
+        target: CGFloat,
+        observed: CGFloat
+    ) -> CGFloat {
+        if observed > target + FrameTolerance.frameWrite { return observed }
+        if target < existing - FrameTolerance.frameWrite { return 1 }
+        return existing
     }
 
     private func evaluateSizeConstraints(
@@ -1894,6 +1910,14 @@ final class WMController {
         existingEntry: WindowState?,
         context: WindowRuleReevaluationContext
     ) -> TrackedWindowMode? {
+        if context == .automatic,
+           let existingEntry,
+           decision.isTransientWidgetSurfaceDecision
+        {
+            floatDemotionFirstSamplesByToken.removeValue(forKey: existingEntry.token)
+            return existingEntry.mode
+        }
+
         guard let trackedMode = trackedModeForLifecycle(
             decision: decision,
             existingEntry: existingEntry
@@ -1957,7 +1981,8 @@ final class WMController {
         existingEntry: WindowState?,
         fallbackWorkspaceId: WorkspaceDescriptor.ID?,
         structuralReplacementWorkspaceId: WorkspaceDescriptor.ID? = nil,
-        restrictWorkspaceRuleToPlacementMonitor: Bool = true,
+        placementMode: TrackedWindowMode,
+        placementOrigin: WorkspacePlacementOrigin,
         createPlacementContext: WindowCreatePlacementContext? = nil,
         windowFrame: CGRect? = nil,
         context: WindowRuleReevaluationContext = .automatic
@@ -1969,12 +1994,13 @@ final class WMController {
             pid: evaluation.token.pid,
             parentWindowId: evaluation.facts.windowServer?.parentId,
             inheritTrackedParentWorkspace: inheritTrackedParentWorkspace,
-            preferSameAppSiblingWorkspace: shouldPreferSameAppSiblingWorkspace(
-                for: evaluation,
-                inheritTrackedParentWorkspace: inheritTrackedParentWorkspace
-            ),
             structuralReplacementWorkspaceId: structuralReplacementWorkspaceId,
-            restrictWorkspaceRuleToPlacementMonitor: restrictWorkspaceRuleToPlacementMonitor,
+            placementMode: placementMode,
+            allowsFloatingSpawnPlacement: allowsFloatingSpawnPlacement(
+                for: evaluation,
+                mode: placementMode
+            ),
+            origin: placementOrigin,
             createPlacementContext: createPlacementContext,
             windowFrame: windowFrame ?? evaluation.facts.windowServer?.frame,
             existingEntry: existingEntry,
@@ -1989,6 +2015,7 @@ final class WMController {
         appFullscreen: Bool? = nil,
         applyingManualOverride: Bool = true,
         windowInfo: WindowServerInfo? = nil,
+        windowServerLookupAttempted: Bool = false,
         admissionGeometry: WindowAdmissionGeometryEvidence? = nil
     ) -> WindowDecisionEvaluation {
         let token = WindowToken(pid: pid, windowId: axRef.windowId)
@@ -2015,25 +2042,51 @@ final class WMController {
             sizeConstraints: sizeConstraints,
             windowServer: nil
         )
-        let resolvedWindowInfo = baseFacts.windowServer ?? resolveWindowServerInfoForDisposition(
-            token: token,
-            bundleId: baseFacts.ax.bundleId ?? appInfo?.bundleId,
-            preferredWindowInfo: windowInfo
-        )
-        let facts = WindowRuleFacts(
-            appName: baseFacts.appName,
-            ax: baseFacts.ax,
-            sizeConstraints: baseFacts.sizeConstraints,
-            windowServer: resolvedWindowInfo
-        )
         let fullscreen = appFullscreen ?? AXWindowService.isFullscreen(axRef)
-        return makeWindowDispositionEvaluation(
-            token: token,
-            facts: facts,
-            appFullscreen: fullscreen,
-            applyingManualOverride: applyingManualOverride,
-            admissionGeometry: admissionGeometry
-        )
+        let bundleId = baseFacts.ax.bundleId ?? appInfo?.bundleId
+        var lookupAttempted = windowServerLookupAttempted || windowInfo != nil
+        var resolvedWindowInfo = Self.exactWindowServerInfo(windowInfo, for: token)
+        if resolvedWindowInfo == nil,
+           !lookupAttempted,
+           bundleId == WindowRuleEngine.cleanShotBundleId
+        {
+            lookupAttempted = true
+            resolvedWindowInfo = resolveWindowServerInfoForDisposition(
+                token: token,
+                bundleId: bundleId,
+                axFacts: baseFacts.ax,
+                preferredWindowInfo: nil
+            )
+        }
+
+        func evaluate(with windowServer: WindowServerInfo?) -> WindowDecisionEvaluation {
+            makeWindowDispositionEvaluation(
+                token: token,
+                facts: WindowRuleFacts(
+                    appName: baseFacts.appName,
+                    ax: baseFacts.ax,
+                    sizeConstraints: baseFacts.sizeConstraints,
+                    windowServer: windowServer
+                ),
+                appFullscreen: fullscreen,
+                applyingManualOverride: applyingManualOverride,
+                admissionGeometry: admissionGeometry
+            )
+        }
+
+        var evaluation = evaluate(with: resolvedWindowInfo)
+        if evaluation.decision.deferredReason == .windowServerEvidenceMissing,
+           !lookupAttempted
+        {
+            resolvedWindowInfo = resolveWindowServerInfoForDisposition(
+                token: token,
+                bundleId: bundleId,
+                axFacts: baseFacts.ax,
+                preferredWindowInfo: nil
+            )
+            evaluation = evaluate(with: resolvedWindowInfo)
+        }
+        return evaluation
     }
 
     func evaluateWindowDisposition(
@@ -2068,7 +2121,7 @@ final class WMController {
                 appName: appInfo?.name,
                 ax: axFacts,
                 sizeConstraints: evidence.sizeConstraints,
-                windowServer: windowInfo
+                windowServer: Self.exactWindowServerInfo(windowInfo, for: token)
             ),
             appFullscreen: appFullscreen,
             applyingManualOverride: applyingManualOverride,
@@ -2139,22 +2192,42 @@ final class WMController {
         )
     }
 
-    private func resolveWindowServerInfoForDisposition(
+    static func exactWindowServerInfo(
+        _ windowInfo: WindowServerInfo?,
+        for token: WindowToken
+    ) -> WindowServerInfo? {
+        guard let windowInfo,
+              let windowId = UInt32(exactly: token.windowId),
+              windowInfo.id == windowId,
+              pid_t(windowInfo.pid) == token.pid
+        else {
+            return nil
+        }
+        return windowInfo
+    }
+
+    func resolveWindowServerInfoForDisposition(
         token: WindowToken,
         bundleId: String?,
+        axFacts: AXWindowFacts,
         preferredWindowInfo: WindowServerInfo?
     ) -> WindowServerInfo? {
-        if let preferredWindowInfo {
-            return preferredWindowInfo
+        if preferredWindowInfo != nil {
+            return Self.exactWindowServerInfo(preferredWindowInfo, for: token)
         }
 
-        guard bundleId == WindowRuleEngine.cleanShotBundleId,
+        guard axFacts.role != (kAXHelpTagRole as String),
+              bundleId == WindowRuleEngine.cleanShotBundleId
+              || WindowRuleEngine.isTransientWidgetAXCandidate(axFacts),
               let windowId = UInt32(exactly: token.windowId)
         else {
             return nil
         }
 
-        return SkyLight.shared.queryWindowInfo(windowId)
+        return Self.exactWindowServerInfo(
+            axEventHandler.resolveWindowInfo(windowId),
+            for: token
+        )
     }
 
     func decideWindowDisposition(
@@ -2321,6 +2394,9 @@ final class WMController {
             let createPlacementContext = existingEntry == nil
                 ? axEventHandler.pendingCreatePlacementContext(for: token.windowId)
                 : nil
+            let placementOrigin: WorkspacePlacementOrigin = createPlacementContext == nil
+                ? .discovery
+                : .liveCreate
 
             evaluatedAnyWindow = true
             let evaluation = evaluateWindowDisposition(axRef: axRef, pid: token.pid)
@@ -2355,7 +2431,8 @@ final class WMController {
                 axRef: axRef,
                 token: token,
                 mode: effectiveTrackedMode,
-                existingEntry: existingEntry
+                existingEntry: existingEntry,
+                placementOrigin: placementOrigin
             ) {
                 continue
             }
@@ -2377,7 +2454,8 @@ final class WMController {
                 existingEntry: existingEntry,
                 fallbackWorkspaceId: activeWorkspace()?.id,
                 structuralReplacementWorkspaceId: structuralMatch?.workspaceId,
-                restrictWorkspaceRuleToPlacementMonitor: effectiveTrackedMode != .floating,
+                placementMode: effectiveTrackedMode,
+                placementOrigin: placementOrigin,
                 createPlacementContext: createPlacementContext,
                 context: context
             )
@@ -3133,9 +3211,25 @@ extension WMController {
         windowId: Int,
         axRef: AXWindowRef
     ) {
-        windowFocusOperations.activateApp(pid)
+        let policy = workspaceManager.entry(forWindowId: windowId)?.interactionPolicy ?? .full
+        guard policy.mayFocus,
+              focusPolicyEngine.evaluate(.windowFronting).allowsFocusChange
+        else {
+            return
+        }
+        if policy.mayActivateApp {
+            windowFocusOperations.activateApp(pid)
+        }
         windowFocusOperations.focusSpecificWindow(pid, UInt32(windowId), axRef.element)
-        windowFocusOperations.raiseWindow(axRef.element)
+        if policy.mayRaise {
+            windowFocusOperations.raiseWindow(axRef.element)
+        }
+    }
+
+    func performWindowOrdering(windowId: Int) {
+        let policy = workspaceManager.entry(forWindowId: windowId)?.interactionPolicy ?? .full
+        guard policy.mayOrder else { return }
+        windowFocusOperations.orderWindow(UInt32(windowId))
     }
 
     func retryManagedFocusFronting(_ request: ManagedFocusRequest) {

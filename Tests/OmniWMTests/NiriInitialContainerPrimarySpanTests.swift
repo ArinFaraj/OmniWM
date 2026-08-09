@@ -325,7 +325,6 @@ final class NiriInitialContainerPrimarySpanTests: XCTestCase {
         let workspaceId = try XCTUnwrap(
             controller.workspaceManager.workspaceId(for: "1", createIfMissing: true)
         )
-        let monitor = try XCTUnwrap(controller.workspaceManager.monitor(for: workspaceId))
         controller.settings.updateOrientationSettings(
             MonitorOrientationSettings(
                 monitorName: monitor.name,

@@ -29,6 +29,7 @@ extension AXEventHandler {
             admissionHints: candidate.admissionHints,
             managedReplacementMetadata: candidate.replacementMetadata
         )
+        controller.workspaceManager.setInteractionPolicy(candidate.interactionPolicy, for: trackedToken)
         guard let trackedEntry = controller.workspaceManager.entry(for: trackedToken) else {
             WindowAdmissionTrace.record(
                 .init(
@@ -42,6 +43,7 @@ extension AXEventHandler {
                 )
             )
             scheduleAXContextWarmup(for: candidate.token.pid)
+            rejectDeferredReplacement(windowId: candidate.windowId)
             return
         }
         guard trackedToken == candidate.token else {
@@ -103,7 +105,8 @@ extension AXEventHandler {
             controller.workspaceManager.entries(forPid: liveTrackedEntry.pid)
         )
         if let floatingTargetFrame,
-           shouldApplyFloatingCreateFrameImmediately(for: liveTrackedEntry.workspaceId)
+           shouldApplyFloatingCreateFrameImmediately(for: liveTrackedEntry.workspaceId),
+           candidate.interactionPolicy.mayWriteFrame
         {
             scheduleFloatingCreateFrameApplication(
                 floatingTargetFrame,
@@ -115,7 +118,9 @@ extension AXEventHandler {
         } else {
             scheduleAXContextWarmup(for: liveTrackedEntry.pid)
         }
-        if liveTrackedEntry.mode == .floating {
+        if liveTrackedEntry.mode == .floating,
+           candidate.interactionPolicy.mayFocus
+        {
             controller.windowActionHandler.focusCreatedFloatingWindow(trackedToken)
         }
         if candidate.requiresPostCreateLifecycleVerification {

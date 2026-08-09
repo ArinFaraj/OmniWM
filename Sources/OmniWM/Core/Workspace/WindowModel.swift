@@ -64,7 +64,6 @@ final class WindowModel {
     private var tokenIndexByWorkspaceMode: [WorkspaceModeKey: [WindowToken: Int]] = [:]
     private var tokensByPid: [pid_t: [WindowToken]] = [:]
     private var tokenIndexByPid: [pid_t: [WindowToken: Int]] = [:]
-    private var missingDetectionCountByToken: [WindowToken: Int] = [:]
 
     private func appendToken<Key: Hashable>(
         _ token: WindowToken,
@@ -230,7 +229,6 @@ final class WindowModel {
                 constraintsCacheByToken.removeValue(forKey: token)
             }
             entries[token]?.admissionHints = admissionHints
-            missingDetectionCountByToken.removeValue(forKey: token)
             return token
         }
 
@@ -246,7 +244,6 @@ final class WindowModel {
         entries[token] = entry
         handleByToken[token] = WindowHandle(id: token)
         appendIndexes(for: entry)
-        missingDetectionCountByToken.removeValue(forKey: token)
         return token
     }
 
@@ -283,7 +280,8 @@ final class WindowModel {
         entry.token = newToken
         entry.axRef = newAXRef
         constraintsCacheByToken.removeValue(forKey: oldToken)
-        if let minSize = observedMinSizeByToken.removeValue(forKey: oldToken) {
+        let preservesAXIncarnation = CFEqual(entry.axRef.element, newAXRef.element)
+        if let minSize = observedMinSizeByToken.removeValue(forKey: oldToken), preservesAXIncarnation {
             observedMinSizeByToken[newToken] = minSize
         }
         if let handle = handleByToken.removeValue(forKey: oldToken) {
@@ -295,10 +293,6 @@ final class WindowModel {
         }
         entries[newToken] = entry
         rekeyIndexes(for: entry, from: oldToken, to: newToken)
-
-        if let missingCount = missingDetectionCountByToken.removeValue(forKey: oldToken) {
-            missingDetectionCountByToken[newToken] = missingCount
-        }
 
         return entry
     }
@@ -369,6 +363,10 @@ final class WindowModel {
         return tokens.compactMap { entries[$0] }
     }
 
+    func hasEntries(forPid pid: pid_t) -> Bool {
+        tokensByPid[pid]?.isEmpty == false
+    }
+
     func entry(forWindowId windowId: Int) -> WindowState? {
         windowIdToToken[windowId].flatMap { entries[$0] }
     }
@@ -433,6 +431,10 @@ final class WindowModel {
 
     func setAdmissionHints(_ hints: ManagedWindowAdmissionHints, for token: WindowToken) {
         entries[token]?.admissionHints = hints
+    }
+
+    func setInteractionPolicy(_ policy: WindowInteractionPolicy, for token: WindowToken) {
+        entries[token]?.interactionPolicy = policy
     }
 
     func lifecyclePhase(for token: WindowToken) -> WindowLifecyclePhase? {
@@ -508,52 +510,8 @@ final class WindowModel {
         return true
     }
 
-    func confirmedMissingKeys(
-        keys activeKeys: Set<WindowKey>,
-        requiredConsecutiveMisses: Int = 1,
-        spaceTopology: SpaceTopology = SpaceTopology()
-    ) -> [WindowKey] {
-        let threshold = max(1, requiredConsecutiveMisses)
-        let knownTokens = Array(entries.keys)
-
-        for token in knownTokens where activeKeys.contains(token) {
-            missingDetectionCountByToken.removeValue(forKey: token)
-        }
-
-        let missingTokens = knownTokens.filter { !activeKeys.contains($0) }
-        var confirmedMissing: [WindowToken] = []
-        confirmedMissing.reserveCapacity(missingTokens.count)
-
-        for token in missingTokens {
-            if entries[token]?.layoutReason == .nativeFullscreen {
-                missingDetectionCountByToken.removeValue(forKey: token)
-                continue
-            }
-            if let windowId = entries[token]?.windowId,
-               spaceTopology.isWindowOnKnownInactiveSpace(windowId)
-            {
-                missingDetectionCountByToken.removeValue(forKey: token)
-                continue
-            }
-            let misses = (missingDetectionCountByToken[token] ?? 0) + 1
-            if misses >= threshold {
-                confirmedMissing.append(token)
-                missingDetectionCountByToken.removeValue(forKey: token)
-            } else {
-                missingDetectionCountByToken[token] = misses
-            }
-        }
-
-        if !missingDetectionCountByToken.isEmpty {
-            missingDetectionCountByToken = missingDetectionCountByToken.filter { entries[$0.key] != nil }
-        }
-
-        return confirmedMissing
-    }
-
     @discardableResult
     func removeWindow(key: WindowKey) -> WindowState? {
-        missingDetectionCountByToken.removeValue(forKey: key)
         handleByToken.removeValue(forKey: key)
         constraintsCacheByToken.removeValue(forKey: key)
         observedMinSizeByToken.removeValue(forKey: key)

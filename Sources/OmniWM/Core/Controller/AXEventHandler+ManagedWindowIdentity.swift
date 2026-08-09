@@ -54,10 +54,13 @@ extension AXEventHandler {
         }
 
         if changesRuntimeIdentity {
-            controller.axManager.commitFrameApplicationStateForRebind(
+            let retainedParkTarget = controller.axManager.commitFrameApplicationStateForRebind(
                 from: oldWindow,
                 to: newWindow
             )
+            if let retainedParkTarget {
+                controller.axManager.applyParkFramesParallel([retainedParkTarget])
+            }
             bindCurrentManagedWindows(afterRebinding: oldWindow, to: newWindow)
         }
         finishManagedWindowIdentityRebind(
@@ -157,7 +160,7 @@ extension AXEventHandler {
                 retryGeneration: retryGeneration,
                 executionOwner: executionOwner
             )
-            controller.layoutRefreshController.requestFullRescan(reason: .staleFullRescan)
+            requestTargetedFullRescan(for: [oldWindow.token.pid, newWindow.token.pid])
             return
         }
 
@@ -178,14 +181,17 @@ extension AXEventHandler {
                 retryGeneration: retryGeneration,
                 executionOwner: executionOwner
             )
-            controller.layoutRefreshController.requestFullRescan(reason: .staleFullRescan)
+            requestTargetedFullRescan(for: [oldWindow.token.pid, newWindow.token.pid])
             return
         }
-        controller.axManager.commitFrameApplicationStateForRebind(
+        let retainedParkTarget = controller.axManager.commitFrameApplicationStateForRebind(
             from: oldWindow,
             to: newWindow,
             acknowledgement: acknowledgement
         )
+        if let retainedParkTarget {
+            controller.axManager.applyParkFramesParallel([retainedParkTarget])
+        }
         requiresBindingRefresh = true
         guard currentManagedWindowIdentityRebindEntry(
             from: oldWindow,
@@ -206,7 +212,7 @@ extension AXEventHandler {
                 retryGeneration: retryGeneration,
                 executionOwner: executionOwner
             )
-            controller.layoutRefreshController.requestFullRescan(reason: .staleFullRescan)
+            requestTargetedFullRescan(for: [oldWindow.token.pid, newWindow.token.pid])
             return
         }
         if let sizeConstraints {
@@ -228,7 +234,7 @@ extension AXEventHandler {
                 retryGeneration: retryGeneration,
                 executionOwner: executionOwner
             )
-            controller.layoutRefreshController.requestFullRescan(reason: .staleFullRescan)
+            requestTargetedFullRescan(for: [oldWindow.token.pid, newWindow.token.pid])
             return
         }
         guard let currentEntry = currentManagedWindowIdentityRebindEntry(
@@ -244,7 +250,7 @@ extension AXEventHandler {
                 retryGeneration: retryGeneration,
                 executionOwner: executionOwner
             )
-            controller.layoutRefreshController.requestFullRescan(reason: .staleFullRescan)
+            requestTargetedFullRescan(for: [oldWindow.token.pid, newWindow.token.pid])
             return
         }
         finishManagedWindowIdentityRebind(
@@ -377,7 +383,8 @@ extension AXEventHandler {
         }
         if state.identityRebindTargetDestroyed {
             cancelCreatedWindowRetry(windowId: windowId)
-            controller.layoutRefreshController.requestFullRescan(reason: .staleFullRescan)
+            discardDeferredReplacementProtection(windowId: windowId)
+            requestTargetedFullRescan(for: [oldWindow.token.pid, newWindow.token.pid])
             return
         }
         if controller.hasStartedServices,
@@ -388,7 +395,7 @@ extension AXEventHandler {
                 retryGeneration: retryGeneration,
                 executionOwner: executionOwner
             )
-            controller.layoutRefreshController.requestFullRescan(reason: .staleFullRescan)
+            requestTargetedFullRescan(for: [oldWindow.token.pid, newWindow.token.pid])
             return
         }
         state.task = nil
@@ -422,6 +429,7 @@ extension AXEventHandler {
             return
         }
         cancelCreatedWindowRetry(windowId: windowId)
+        discardDeferredReplacementProtection(windowId: windowId)
     }
 
     private func finishManagedWindowIdentityRebind(
@@ -433,6 +441,16 @@ extension AXEventHandler {
         admissionHints: ManagedWindowAdmissionHints?
     ) {
         guard let controller else { return }
+        let completesPendingManagedReplacement = admissionRetryStateByWindowId[windowId].map { state in
+            guard !state.exhausted,
+                  case let .identityRebind(retryOld, retryNew, metadata, _, _) = state.trigger
+            else {
+                return false
+            }
+            return retryOld.token == oldWindow.token
+                && retryNew.token == newWindow.token
+                && metadata != nil
+        } ?? false
         if let admissionHints {
             _ = controller.workspaceManager.updateAdmissionHints(admissionHints, for: newWindow.token)
         }
@@ -447,7 +465,10 @@ extension AXEventHandler {
         finishAdmissionRetryAfterTracking(windowId: windowId)
         discardCreatePlacementContext(windowId: windowId)
         cancelPostCreateLifecycleVerification(for: oldWindow.token)
-        cancelSameAppCloseProbe(matchingFocusedToken: oldWindow.token, reason: "identity_rebind")
+        let closeProbe = cancelSameAppCloseProbe(
+            matchingFocusedToken: oldWindow.token,
+            reason: "identity_rebind"
+        )
         clearTerminalFrameFailure(windowId: oldWindow.token.windowId)
         admissionQuarantineByWindowId.removeValue(forKey: oldWindow.token.windowId)
         identityAliasesByWindowId.removeValue(forKey: oldWindow.token.windowId)
@@ -469,6 +490,11 @@ extension AXEventHandler {
         )
         controller.requestWorkspaceBarRefresh()
         controller.surfaceReconciler.noteRestackOccurred()
+        if completesPendingManagedReplacement,
+           let closeProbe
+        {
+            handleSameAppCloseProbeDeadline(closeProbe, focusedToken: newWindow.token)
+        }
     }
 
     private func commitManagedWindowIdentityRebind(
@@ -497,6 +523,10 @@ extension AXEventHandler {
                 from: oldToken,
                 to: newToken,
                 entry: entry
+            )
+            controller.layoutRefreshController.rekeyNativeFullscreenRestoredFrameApply(
+                from: oldToken,
+                to: newToken
             )
             controller.dwindleLayoutHandler.rekeyPendingGroupRevealTransaction(
                 from: oldToken,

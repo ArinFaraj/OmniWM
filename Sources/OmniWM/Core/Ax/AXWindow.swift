@@ -211,14 +211,11 @@ func sameAXWindowIdentity(_ lhs: AXWindowRef, _ rhs: AXWindowRef) -> Bool {
 
 enum AXWindowHeuristicReason: String, Sendable {
     case attributeFetchFailed
-    case browserPictureInPicture
     case accessoryWithoutClose
-    case trustedFloatingSubrole
     case noButtonsOnNonStandardSubrole
     case nonStandardSubrole
     case missingFullscreenButton
     case disabledFullscreenButton
-    case fixedSizeWindow
 }
 
 struct AXWindowFacts: Equatable, Sendable {
@@ -812,7 +809,6 @@ enum AXWindowService {
 
     static func heuristicDisposition(
         for facts: AXWindowFacts,
-        sizeConstraints: WindowSizeConstraints? = nil,
         overriddenWindowType: AXWindowType? = nil
     ) -> AXWindowHeuristicDisposition {
         if let overriddenWindowType {
